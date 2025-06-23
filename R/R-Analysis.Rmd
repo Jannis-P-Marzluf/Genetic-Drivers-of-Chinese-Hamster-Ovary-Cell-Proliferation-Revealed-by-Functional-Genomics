@@ -1,0 +1,2250 @@
+---
+title: "Genetic Drivers of Chinese Hamster Ovary Cells Proliferation Revealed by Wholistic Functional Genomics"
+author: "Jannis Marzluf"
+date: "2025-05-08"
+output:
+  html_document:
+    self_contained: yes
+    mode: selfcontained
+    toc: true
+    toc_float: true
+    toc_depth: 4 
+
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE, results = 'asis', tidy = FALSE, cache = TRUE,
+                      message = FALSE, warning = FALSE, dpi = 300)
+
+options(knitr.table.format = "html")
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+# ---- Analysis Setup ----
+
+# Data Manipulation and Cleaning  
+library(dplyr)  
+library(tidyr)  
+library(stringr)  
+library(purrr)  
+
+# Visualization  
+library(ggplot2)  
+library(pheatmap)  
+library(reshape2)
+library(VennDiagram)
+library(scales)
+
+# Statistical Analysis  
+library(e1071)
+library(clusterProfiler)  
+library(org.Hs.eg.db)  
+library(ReactomePA)  
+
+# Data Import and Export  
+library(readr)  
+library(readxl)  
+library(openxlsx)  
+
+# Reporting and Tables  
+library(knitr)  
+library(kableExtra)  
+
+# Pathway Visualization  
+library(pathview)  
+
+
+
+# Get the path of the script's directory
+script_path <- dirname(rstudioapi::getSourceEditorContext()$path)
+
+# Set the working directory to the script's directory
+setwd(script_path)
+
+# Output the current working directory to the console
+getwd()
+```
+
+
+\
+
+**CRG18 CHO Whole Genome Library Screen Report**
+
+This report summarizes the analysis of the CHO Whole Genome CRISPR Screen, covering all time points and experimental conditions. The goal is to identify gene-level enrichments and depletions from NGS read count data to prioritize knockout (KO) and derive an essential gene List.  
+
+**Experiment Details**  
+- **Cas9-Expressing Pool Selection**: 2000 µg/mL G418  
+- **Cultivation**:  
+  - P1: RM Reactor  
+  - P2–P4: Large Shake Flasks (800 mL continuous culture)  
+
+**Analysis Overview**  
+1. **Data Exploration and Quality Assessment**  
+   - Sample purity assessment, read count distribution analysis.  
+2. **MAGeCK Enrichment/Depletion Analysis**  
+   - Gene-level hit calling using Robust Rank Aggregation (RRA) and log2 fold changes.  
+   - Overlap analysis across time points (2, 4, 6 weeks) and cultivation formats.  
+3. **Gene Scoring and Prioritization**  
+   - Composite quality scores and weighted gene scoring.  
+4. **Functionalization of Results**  
+   - Gene Set Enrichment Analysis (GSEA) and pathway visualization.  
+   - Gene set construction and clustering based on biological themes.  
+5. **Benchmarking**  
+   - Comparison against published CRISPR screens and essential gene sets.  
+
+> *Note: Some example analyses are shown for illustration. Final gene lists and conclusions are based on in-depth investigations and extended analysis.*  
+
+
+ 
+\  
+
+# 1 Data Import  
+
+\  
+
+
+```{r prep import data, echo = FALSE, message = FALSE}
+#----Import all Read Counts into Environment----
+
+# Load NGS Read Count Data into R Session
+ReadCountsCHOWGL <- as.data.frame(read_excel("./input_data/Count_Table.xlsx", sheet = "Count_Table_R_Analysis"))
+
+# Extract sgRNA Names as RowNames
+sgRNArownames <- c(ReadCountsCHOWGL[,1])
+
+#Extract all CountData Except ID and sequences
+AllReadCountsColumns <- c("QC-Reads","S10.P2.t2w","S11.P3.t2w","S12.P4.t2w","S13.P1.t2w","S35.P2.t4w","S36.P3.t4w","S37.P4.t4w","S38.P1.t4w","S42.P2.t6w","S43.P3.t6w","S44.P4.t6w","S45.P1.t6w")
+
+# head(ReadCountsCHOWGL)
+AllReadCounts <- ReadCountsCHOWGL[,AllReadCountsColumns] 
+row.names(AllReadCounts) <- sgRNArownames
+```
+
+Check how many rows across all samples have 0 Reads:
+
+```{r Zero check, echo = FALSE, message = FALSE}
+#Check for 0 rows in AllReadCounts
+num_rows_all_zeros <- sum(apply(AllReadCounts == 0, 1, all))
+print(num_rows_all_zeros)
+
+```
+
+
+\
+
+## 1.1 Additional Gene Metadata
+
+\
+
+```{r Import Metadata annotated ID and Counts}
+
+# Transfer of Metadata outside of R
+ReadCountsCHOWGLV4 <- as.data.frame(read_excel("./input_data/ReadCountsCHOWGLV4.xlsx", sheet = "Metadata_Counts", 
+                                               col_types = "text"))
+
+```
+
+*Summary of Gene Annotation Metadata*
+
+The plot displays the distribution of unique, not unique, and missing/NA values across various columns in the gene annotation metadata.
+
+*Key Observations:*
+
+1. **Most Unique Values:**
+   - `Gene_ID`: This column shows perfect uniqueness => internal genome reference.
+   - `Gene_Name`: High number of unique values, but also contains some duplicates and missing/NA gene names.
+   - `Preferred_name`: Predominantly unique values with some duplicates and some missing/NA gene names.
+   - `seed_ortholog`: Predominantly unique values with few duplicates and few missing/NA gene names.
+   - `clustered_nr_hit`: Predominantly unique values with few duplicates and few missing/NA gene names.
+
+2. **Potential Gene References for Downstream Analysis:**
+   - `Preferred_name`: Shows a mix of unique and not unique values. While it has a good number of unique entries, there are significant duplicates and some missing entries.
+     - **Advantages:** 
+       - Single human reference, easy analysis.
+     - **Disadvantages:** 
+       - Information loss when using these IDs.
+       - Significant gene name duplications might decrease accuracy of results.
+   - `clustered_nr_hit`: Similar to `Preferred_name`, it has a balance of unique and not unique values.
+     - **Advantages:** 
+       - Most unique IDs, highest conservation of information.
+       - Very few duplicates or missing values.
+     - **Disadvantages:** 
+       - Highly complex analysis.
+       - Integration of multiple annotations from multiple organisms needed.
+   - `seed_ortholog`: Predominantly unique values with few duplicates and few missing/NA gene names.
+     - **Advantages:** 
+       - Second most unique IDs, high conservation of information.
+       - Very few duplicates or missing values.
+     - **Disadvantages:** 
+       - Highly complex analysis.
+       - Integration of multiple annotations from multiple organisms needed.
+
+*Analysis for Downstream Use:*
+
+- `Preferred_name` and `clustered_nr_hit` could be used for downstream analysis, but caution is needed due to the presence of duplicates.
+
+We will proceed with `Preferred_name` annotations to avoid setting up the analysis with a necessary integration of IDs from multiple organisms. Analogous to human identifiers based on closest similarity.
+
+
+
+\  
+
+# 2 Data Exploration and Quality Assessment  
+
+We performed a comprehensive analysis to assess sequencing data quality and compare experimental conditions using key quality metrics.  
+
+**Analysis Workflow:**  
+
+- **Data Preparation**  
+    - Sample purity data was imported and merged with sequencing read count distributions.  
+
+- **Calculation of Quality Metrics**  
+    - For each sample, the following metrics were calculated:  
+        - **Purity**: Percentage of target cell content.  
+        - **Mean and Median Read Counts**: Indicators of central tendency.  
+        - **Standard Deviation (SD) and Coefficient of Variation (CV)**: Measures of variability.  
+        - **Skewness and Kurtosis**: Assessments of read count distribution shape.  
+        - **Low-Count Percentage**: Proportion of sgRNAs with read counts below 100.  
+
+- **Quality Score Calculation**  
+    - Metrics were normalized using min-max scaling.  
+    - A composite quality score was calculated using weighted contributions:  
+        - **Purity** (5%), **Median Read Count** (15%), **Standard Deviation** (45%), **Skewness** (15%), **Low-Count Percentage** (30%).  
+    - Final scores were scaled relative to the highest observed quality score to obtain a **scaled quality score**.  
+
+- **Comparison of Experimental Groups**  
+    - Samples were grouped based on experimental conditions (e.g., *2 Week*, *4 Week*, *6 Week*, *Shake Flask*, *Perfusion*).  
+    - Group-level scores were calculated as the average scaled score of samples within each group.  
+    - Group scores were adjusted based on the number of biological replicates to prioritize robust experimental designs.  
+
+**Key Results:**  
+- Higher sample purity was associated with improved sequencing quality and lower variability.  
+- Experimental groups with high purity and consistent read distributions achieved higher quality scores.  
+- Groups with more replicates received higher final comparison scores, emphasizing experimental robustness.  
+
+> **Note:** The provided R code represents an *example workflow*. Final results and scores used in the study may deviate slightly from those calculated by the example script.  
+
+
+
+```{r}
+##################### Re-Factored Code as Example #####################
+############# Quality Metrics and Scoring Pipeline (Updated Samples) #############
+
+# ---- 1. Input Data Preparation ----
+purity_data <- data.frame(
+  Sample = c("QC-Reads", "S10.P2.t2w", "S11.P3.t2w", "S12.P4.t2w", "S13.P1.t2w", 
+             "S35.P2.t4w", "S36.P3.t4w", "S37.P4.t4w", "S38.P1.t4w", 
+             "S42.P2.t6w", "S43.P3.t6w", "S44.P4.t6w", "S45.P1.t6w"),
+  Purity = c(100, 55.0, 61.2, 63.7, 52.4, 84.3, 92.4, 93.0, 89.4, 
+              90.6, 96.8, 97.2, 95.9)
+)
+
+# ---- Assume AllReadCounts is loaded and contains the following samples only ----
+AllReadCountsColumns <- c("QC-Reads", "S10.P2.t2w", "S11.P3.t2w", "S12.P4.t2w", 
+                          "S13.P1.t2w", "S35.P2.t4w", "S36.P3.t4w", "S37.P4.t4w", 
+                          "S38.P1.t4w", "S42.P2.t6w", "S43.P3.t6w", "S44.P4.t6w", "S45.P1.t6w")
+
+filtered_AllReadCounts <- AllReadCounts %>%
+  dplyr::select(all_of(AllReadCountsColumns))
+
+# ---- 2. Compute Quality Metrics ----
+quality_metrics <- filtered_AllReadCounts %>%
+  summarise(across(everything(), list(
+    mean = mean,
+    median = median,
+    sd = sd,
+    cv = ~ sd(.) / mean(.),
+    skewness = ~ skewness(.),
+    kurtosis = ~ kurtosis(.),
+    low_count_pct = ~ mean(. < 100) * 100
+  ), .names = "{.col}_{.fn}"))
+
+quality_metrics_long <- quality_metrics %>%
+  pivot_longer(cols = everything(), names_to = "Sample_Metric", values_to = "Value") %>%
+  separate(Sample_Metric, into = c("Sample", "Metric"), sep = "_", extra = "merge") %>%
+  pivot_wider(names_from = Metric, values_from = Value)
+
+merged_data <- merge(purity_data, quality_metrics_long, by = "Sample")
+
+# ---- 3. Normalize Metrics and Compute Scores ----
+normalized_data <- merged_data %>%
+  mutate(
+    norm_purity = (Purity - min(Purity)) / (max(Purity) - min(Purity)),
+    norm_median = (median - min(median)) / (max(median) - min(median)),
+    norm_sd = 1 - (sd - min(sd)) / (max(sd) - min(sd)),
+    norm_skewness = 1 - abs(skewness) / max(abs(skewness)),
+    norm_low_count_pct = 1 - (low_count_pct - min(low_count_pct)) / (max(low_count_pct) - min(low_count_pct))
+  )
+
+weights <- c(
+  purity = 0.05,
+  median = 0.15,
+  sd = 0.45,
+  skewness = 0.15,
+  low_count_pct = 0.3
+)
+
+normalized_data <- normalized_data %>%
+  mutate(
+    quality_score = (weights["purity"] * norm_purity) + 
+                    (weights["median"] * norm_median) + 
+                    (weights["sd"] * norm_sd) + 
+                    (weights["skewness"] * norm_skewness) + 
+                    (weights["low_count_pct"] * norm_low_count_pct),
+    scaled_quality_score = quality_score / max(quality_score)
+  )
+
+# ---- 4. Comparison Groups ----
+comparison_groups <- list(
+  "2 Week" = c("S10.P2.t2w", "S11.P3.t2w", "S12.P4.t2w", "S13.P1.t2w"),
+  "4 Week" = c("S35.P2.t4w", "S36.P3.t4w", "S37.P4.t4w", "S38.P1.t4w"),
+  "6 Week" = c("S42.P2.t6w", "S43.P3.t6w", "S44.P4.t6w", "S45.P1.t6w"),
+  "time replicates" = c(
+    "S10.P2.t2w", "S11.P3.t2w", "S12.P4.t2w", "S13.P1.t2w",
+    "S35.P2.t4w", "S36.P3.t4w", "S37.P4.t4w", "S38.P1.t4w",
+    "S42.P2.t6w", "S43.P3.t6w", "S44.P4.t6w", "S45.P1.t6w"
+  ),
+  "Perfusion" = c("S13.P1.t2w", "S38.P1.t4w", "S45.P1.t6w"),
+  "Shake-Flask" = c(
+    "S10.P2.t2w", "S11.P3.t2w", "S12.P4.t2w",
+    "S35.P2.t4w", "S36.P3.t4w", "S37.P4.t4w",
+    "S42.P2.t6w", "S43.P3.t6w", "S44.P4.t6w"
+  ))
+
+
+replicate_counts <- c(
+  "2 Week" = 4, 
+  "4 Week" = 4, 
+  "6 Week" = 4, 
+  "time replicates" = 12,
+  "Perfusion" = 3,
+  "Shake-Flask" = 9
+)
+
+comparison_scores <- lapply(names(comparison_groups), function(group) {
+  samples <- comparison_groups[[group]]
+  avg_score <- mean(normalized_data$scaled_quality_score[normalized_data$Sample %in% samples], na.rm = TRUE)
+  rel_score <- avg_score * 0.1 * replicate_counts[group]
+  data.frame(Comparison = group, Relative_Score = rel_score)
+})
+
+comparison_scores_df <- bind_rows(comparison_scores) %>%
+  arrange(desc(Relative_Score))
+
+print(comparison_scores_df)
+
+# ---- 5. Export Final Data ----
+write.xlsx(normalized_data, "./output_data/Comparison_Weights_Scores/QC_Normalized_Scores.xlsx", overwrite = TRUE)
+write.xlsx(comparison_scores_df, "./output_data/Comparison_Weights_Scores/QC_Comparison_Scores_equal_to_comp_weights.xlsx", overwrite = TRUE)
+
+```
+
+
+\
+
+
+# 3 MAGeCK enrichment/depletion analysis 
+
+\
+
+<details>
+   <summary>Click here for more information MAGeCK</summary>
+  
+Model-based Analysis of Genome-wide CRISPR-Cas9 Knockout (MAGeCK) is a computational tool to identify important genes from genome-scale CRISPR-Cas9 knockout screens. For instructions and documentations, please refer to the wiki page: https://sourceforge.net/projects/mageck/
+MAGeCK is developed by Wei Li and Han Xu from Dr. Xiaole Shirley Liu's lab at Dana-Farber Cancer Institute/Harvard School of Public Health, and is maintained by Wei Li lab at Children's National Medical Center. MAGeCK was run seperately using Python and the developers instructions.
+
+</details>
+
+\
+
+We conducted a genome-wide analysis of gene essentiality and growth enhancing gene knockouts using MAGeCK to assess both gene enrichment and depletion across various experimental time points.  
+
+**Analysis Workflow:**  
+
+- **Input Data**  
+    - Raw Illumina read counts were imported directly from Cellecta’s proprietary software.  
+    - Data normalization and preprocessing steps ensured valid comparisons despite variations in library sizes and sequencing depths.  
+
+- **MAGeCK Analysis**  
+    - The MAGeCK Robust Rank Aggregation (RRA) method was used to prioritize genes based on sgRNA read distributions.  
+    - Comparisons were performed for the following conditions:  
+        - 2 Week vs. Plasmid  
+        - 4 Week vs. Plasmid  
+        - 6 Week vs. Plasmid  
+        - Time Replicates Combined  
+        - Perfusion Culture  
+        - Shake Flask Culture  
+    - Log2 fold changes (lfc) were calculated using the `alphamean` method with an alpha cutoff to ensure high-confidence sgRNA inclusion.  
+
+- **Hit Calling Criteria**  
+    - **Depleted Genes (Negative Selection):**  
+        - `neg.fdr < 0.05` OR `(neg.p.value < 0.025 & neg.lfc < 0)`  
+    - **Enriched Genes (Positive Selection):**  
+        - `pos.fdr < 0.05` OR `(pos.p.value < 0.025 & pos.lfc > 1)`  
+    - Both strict and lenient filtering approaches were explored; final results here focus on the lenient criteria for broader discovery.  
+
+- **Quality Control on Control sgRNAs**  
+    - Analysis of non-targeting and intron-targeting sgRNAs confirmed that:  
+        - Non-targeting guides did not contribute to depletion, ensuring minimal off-target effects.  
+        - A minor enrichment of non-targeting guides in positive hits was observed, consistent with known CRISPR growth disadvantage effects.  
+        - Intron-targeting guides showed minimal impact, confirming specificity of targeting.  
+
+- **Overlap and Comparative Analyses**  
+    - Gene overlap analyses between conditions were performed using Venn diagrams.  
+    - Common and condition-specific hits were extracted, ranked, and annotated with functional information.  
+
+- **Final Outputs**  
+    - Tables summarizing significant gene hits across all comparisons.  
+    - Annotated hit tables including Uniprot, KEGG, and GO annotations.  
+    - Venn diagrams visualizing shared and unique hits across timepoints and conditions.  
+    - Exported Excel files with all intermediate and final results.  
+
+> **Note:** The R code provided is intended as *example code*. The final results presented in this report may differ based on specific filtering thresholds or post-hoc adjustments made during in-depth analysis.  
+
+```{r Filter criteria 2}
+# Function to read MAGeCK summary files
+read_mageck_summary <- function(filepath) {
+  # Read the file into a data frame
+  data <- read.table(filepath, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+  return(data)
+}
+
+# Specify the file paths
+file_paths <- c(
+  "./input_data/MAGeCK-output/2weekvsplasmid/MAGeCK2wvsplasmid.gene_summary.txt",
+  "./input_data/MAGeCK-output/4weekvsplasmid/MAGeCK4wvsplasmid.gene_summary.txt",
+  "./input_data/MAGeCK-output/6weekvsplasmid/MAGeCK6wvsplasmid.gene_summary.txt",
+  "./input_data/MAGeCK-output/Time_Repsvsplasmid/MAGeCKpseudoreplicates.gene_summary.txt",
+  "./input_data/MAGeCK-output/Perfusionvsplasmid/MageckP1.gene_summary.txt",
+  "./input_data/MAGeCK-output/Shake_Flaskvsplasmid/MageckExP1.gene_summary.txt"
+)
+
+# Read each file into a list of data frames
+mageck_results_list <- lapply(file_paths, read_mageck_summary)
+
+# Name each data frame in the list for easy reference
+names(mageck_results_list) <- c("2week_vs_plasmid", "4week_vs_plasmid", "6week_vs_plasmid", "time_replicates","Perfusion","Shake_Flask")
+
+# Function to extract top hit tables for positive and negative hits
+extract_top_hits_lenient <- function(df) {
+  neg_hits <- df %>% filter(neg.fdr < 0.05 | (neg.p.value < 0.025 & neg.lfc < 0)) %>% arrange(neg.rank)
+  pos_hits <- df %>% filter(pos.fdr < 0.05 | (pos.p.value < 0.025 & pos.lfc > 1)) %>% arrange(pos.rank)
+  return(list(neg_hits = neg_hits, pos_hits = pos_hits))
+}
+
+# Extract top hit tables for each time point
+top_hits_list_lenient <- lapply(mageck_results_list, extract_top_hits_lenient)
+
+
+# Initialize an empty list to store results
+results_lenient <- list()
+
+# Function to count the total number of rows in a dataframe
+count_rows <- function(df) {
+  nrow(df)
+}
+
+# Iterate over each element in the list object
+for (i in seq_along(top_hits_list_lenient)) {
+  # Extract the source list name
+  comparison <- names(top_hits_list_lenient)[i]
+  
+  # Extract data frames from the source list
+  data_frames <- top_hits_list_lenient[[i]]
+  
+  # Count total rows for neg_hits and pos_hits
+  depleted_genes <- count_rows(data_frames$neg_hits)
+  enriched_genes <- count_rows(data_frames$pos_hits)
+  
+  # Store results in a list
+  results_lenient[[i]] <- list(
+    Comparison = comparison,
+    `Depleted Genes` = depleted_genes,
+    `Enriched Genes` = enriched_genes
+  )
+}
+
+# Convert results to a data frame
+results_df_lenient <- do.call(rbind, lapply(results_lenient, as.data.frame))
+
+# Display the results table
+knitr::kable(results_df_lenient, caption = "Table: Number of positive and negative hits for each comparison.") %>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "200px")
+
+# Write Excel File for each comparison
+openxlsx::write.xlsx(results_df_lenient, file = "./output_data/Hit_Calls/01_All_Hits_for_each_comparison.xlsx", overwrite = TRUE)
+
+# Save the top hit tables to an Excel file
+output_file_lenient <- "./output_data/Hit_Calls/02_top_hits_summary_lenient_v1.xlsx"
+wb_lenient <- createWorkbook()
+
+# Add worksheets for each time point and hit type
+for (time_point in names(top_hits_list_lenient)) {
+  addWorksheet(wb_lenient, paste0(time_point, "_neg_hits"))
+  writeData(wb_lenient, sheet = paste0(time_point, "_neg_hits"), top_hits_list_lenient[[time_point]]$neg_hits)
+  
+  addWorksheet(wb_lenient, paste0(time_point, "_pos_hits"))
+  writeData(wb_lenient, sheet = paste0(time_point, "_pos_hits"), top_hits_list_lenient[[time_point]]$pos_hits)
+}
+
+# Save the workbook
+saveWorkbook(wb_lenient, output_file_lenient, overwrite = TRUE)
+
+# Function to create tables for neg_hits and pos_hits
+create_hit_table_lenient <- function(time_point) {
+  neg_hits <- top_hits_list_lenient[[time_point]]$neg_hits
+  pos_hits <- top_hits_list_lenient[[time_point]]$pos_hits
+
+  # Format numeric columns to scientific notation
+  numeric_cols <- sapply(neg_hits, is.numeric)
+  neg_hits[numeric_cols] <- lapply(neg_hits[numeric_cols], format, scientific = TRUE)
+  
+  numeric_cols <- sapply(pos_hits, is.numeric)
+  pos_hits[numeric_cols] <- lapply(pos_hits[numeric_cols], format, scientific = TRUE)
+
+  neg_table <- data.frame(Gene = neg_hits)
+  pos_table <- data.frame(Gene = pos_hits)
+
+  neg_table <- cbind(Time_Point = time_point, neg_table)
+  pos_table <- cbind(Time_Point = time_point, pos_table)
+
+  return(list(neg_table = neg_table, pos_table = pos_table))
+}
+
+# Generate tables for all time points
+all_tables_lenient <- lapply(names(top_hits_list_lenient), create_hit_table_lenient)
+
+# Combine all neg_hits and pos_hits tables
+all_neg_tables_lenient <- do.call(rbind, lapply(all_tables_lenient, function(x) x$neg_table))
+all_pos_tables_lenient <- do.call(rbind, lapply(all_tables_lenient, function(x) x$pos_table))
+
+# Generate HTML tables for neg_hits and pos_hits
+neg_hits_table_lenient <- knitr::kable(all_neg_tables_lenient, caption = "Table: Negative Hits for all time points") %>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "400px")
+
+pos_hits_table_lenient <- knitr::kable(all_pos_tables_lenient, caption = "Table: Positive Hits for all time points") %>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "400px")
+
+# # Output tables
+# neg_hits_table_lenient
+# pos_hits_table_lenient
+
+
+
+
+############ Occurences of Non-targeting and Intron-targeting sgRNAs in hits Lists ###########
+# Ensure the Gene.id column contains unique values for both negative and positive tables
+unique_neg_tables_lenient <- all_neg_tables_lenient %>% distinct(Gene.id, .keep_all = TRUE)
+unique_pos_tables_lenient <- all_pos_tables_lenient %>% distinct(Gene.id, .keep_all = TRUE)
+
+# Calculate the number of 'Non_targeting' IDs in negative and positive hits
+NT_in_neg_hits_lenient <- sum(grepl("Non_targeting", unique_neg_tables_lenient[["Gene.id"]]))
+NT_in_pos_hits_lenient <- sum(grepl("Non_targeting", unique_pos_tables_lenient[["Gene.id"]]))
+
+# Calculate the total number of rows in negative and positive tables
+total_neg_hits_lenient <- nrow(unique_neg_tables_lenient)
+total_pos_hits_lenient <- nrow(unique_pos_tables_lenient)
+
+# Calculate the number of '-INT' IDs in negative and positive hits
+INT_in_neg_hits_lenient <- sum(grepl("-INT", unique_neg_tables_lenient[["Gene.id"]]))
+INT_in_pos_hits_lenient <- sum(grepl("-INT", unique_pos_tables_lenient[["Gene.id"]]))
+
+# Create a data frame with the results in the x/y format
+results_table_lenient <- data.frame(
+  Category = c("Unique Non_targeting in all Negative Hits", "Unique Non_targeting in all Positive Hits",
+               "Unique Intron-Targeting in all Negative Hits", "Unique Intron-Targeting in all Positive Hits"),
+  Count = c(paste(NT_in_neg_hits_lenient, "/", total_neg_hits_lenient),
+            paste(NT_in_pos_hits_lenient, "/", total_pos_hits_lenient),
+            paste(INT_in_neg_hits_lenient, "/", total_neg_hits_lenient),
+            paste(INT_in_pos_hits_lenient, "/", total_pos_hits_lenient))
+)
+
+# Display the results table
+knitr::kable(results_table_lenient, caption = "Table: Summary of Non-targeting and Intron-Targeting sgRNAs in unique hits lists ") %>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "200px")
+
+# Write Excel File 
+openxlsx::write.xlsx(results_table_lenient, file = "./output_data/Hit_Calls/03_Occurences_INT_NT_guides.xlsx", overwrite = TRUE)
+
+
+########## Overlaps between time points for comparative analysis  ##################
+
+# Lenient hit selection function with lenient criteria for FDR and p-values
+get_hits_lenient <- function(df) {
+  neg_hits <- df %>% 
+    filter(neg.fdr < 0.05 | (neg.p.value < 0.025 & neg.lfc < 0)) %>% 
+    dplyr::select(id, everything())
+  
+  pos_hits <- df %>% 
+    filter(pos.fdr < 0.05 | (pos.p.value < 0.025 & pos.lfc > 1)) %>% 
+    dplyr::select(id, everything())
+  
+  return(list(neg_hits = neg_hits, pos_hits = pos_hits))
+}
+
+#------------------ Apply Hit Selection ------------------#
+hit_names_list_lenient <- lapply(mageck_results_list, get_hits_lenient)
+
+# Extract negative and positive hits (skipping "2 week" index [1])
+neg_hits_list <- lapply(hit_names_list_lenient[2:6], `[[`, "neg_hits")
+pos_hits_list <- lapply(hit_names_list_lenient[2:6], `[[`, "pos_hits")
+
+# Define experimental labels
+labels <- c("4 week", "6 week", "Time Replicates", "Perfusion", "Shake-Flask")
+
+# Create gene ID lists for Venn diagrams
+x_neg_lenient <- setNames(lapply(neg_hits_list, `[[`, "id"), labels)
+x_pos_lenient <- setNames(lapply(pos_hits_list, `[[`, "id"), labels)
+
+#------------------ Venn Diagram Plotting ------------------#
+venn_colors <- c(
+  "4 week"          = "#ff7f0e80",
+  "6 week"          = "#1f77b480",
+  "Time Replicates" = "#17becf80",
+  "Perfusion"       = "#d6272880",
+  "Shake-Flask"     = "#7f7f7f80"
+)
+
+draw_venn_no_title <- function(gene_list, fill_colors, title, filename) {
+  venn_plot <- venn.diagram(
+    x = gene_list,
+    category.names = names(gene_list),
+    filename = NULL,
+    output = FALSE,
+    fill = fill_colors,
+    col = "black",
+    cex = 1.4,
+    cat.cex = 1.8,
+    cat.fontfamily = "Arial",
+    cat.fontface = "bold",
+    fontfamily = "Arial",
+    cat.col = "black",
+    cat.pos = c(-10, 210, -145, 40, 125),
+    cat.dist = c(0.23, 0.23, 0.23, 0.23, 0.26),
+    margin = 0.4
+  )
+  
+  png(filename, width = 2600, height = 2400, units = "px", res = 300)
+  grid.newpage()
+  grid.draw(venn_plot)
+  grid.text(title, x = 0.5, y = 0.92,
+            gp = gpar(fontsize = 22, fontface = "bold", family = "Arial"))
+  dev.off()
+}
+
+# Plot and export FastCHO Venn diagrams
+draw_venn_no_title(
+  gene_list = x_neg_lenient,
+  fill_colors = venn_colors,
+  title = "Depleted Genes",
+  filename = "output_data/Hit_Calls/depleted_genes_venn_final.png"
+)
+
+draw_venn_no_title(
+  gene_list = x_pos_lenient,
+  fill_colors = venn_colors,
+  title = "Enriched Genes",
+  filename = "output_data/Hit_Calls/enriched_genes_venn_final.png"
+)
+
+# Apply the lenient hit selection function to each dataset in mageck_results_list
+hit_names_list_lenient <- lapply(mageck_results_list, get_hits_lenient)
+
+# Extract lists of negative and positive hits for each time point
+neg_hits_2week_lenient <- hit_names_list_lenient[[1]]$neg_hits
+neg_hits_4week_lenient <- hit_names_list_lenient[[2]]$neg_hits
+neg_hits_6week_lenient <- hit_names_list_lenient[[3]]$neg_hits
+neg_hits_time_replicates_lenient <- hit_names_list_lenient[[4]]$neg_hits
+neg_hits_PERF_lenient <- hit_names_list_lenient[[5]]$neg_hits
+neg_hits_SF_lenient <- hit_names_list_lenient[[6]]$neg_hits
+
+pos_hits_2week_lenient <- hit_names_list_lenient[[1]]$pos_hits
+pos_hits_4week_lenient <- hit_names_list_lenient[[2]]$pos_hits
+pos_hits_6week_lenient <- hit_names_list_lenient[[3]]$pos_hits
+pos_hits_time_replicates_lenient <- hit_names_list_lenient[[4]]$pos_hits
+pos_hits_PERF_lenient <- hit_names_list_lenient[[5]]$pos_hits
+pos_hits_SF_lenient <- hit_names_list_lenient[[6]]$pos_hits
+
+# Define functions for calculating common hits, hits in at least two comparisons, and all unique hits
+get_common_ids <- function(ids_list) Reduce(intersect, ids_list)
+get_at_least_two_ids <- function(ids_list) names(table(unlist(ids_list))[table(unlist(ids_list)) >= 2])
+get_all_unique_ids <- function(ids_list) unique(unlist(ids_list))
+
+# Define a list of IDs for negative and positive hits
+neg_hits_list_lenient <- list(
+  neg_hits_2week_lenient$id, neg_hits_4week_lenient$id, neg_hits_6week_lenient$id,
+  neg_hits_time_replicates_lenient$id, neg_hits_PERF_lenient$id, neg_hits_SF_lenient$id
+)
+pos_hits_list_lenient <- list(
+  pos_hits_2week_lenient$id, pos_hits_4week_lenient$id, pos_hits_6week_lenient$id,
+  pos_hits_time_replicates_lenient$id, pos_hits_PERF_lenient$id, pos_hits_SF_lenient$id
+)
+
+# Calculate common, at-least-two, and unique hits for lenient criteria
+common_neg_hits_all_lenient <- get_common_ids(neg_hits_list_lenient)
+common_pos_hits_all_lenient <- get_common_ids(pos_hits_list_lenient)
+at_least_two_neg_hits_lenient <- get_at_least_two_ids(neg_hits_list_lenient)
+at_least_two_pos_hits_lenient <- get_at_least_two_ids(pos_hits_list_lenient)
+all_unique_neg_hits_lenient <- get_all_unique_ids(neg_hits_list_lenient)
+all_unique_pos_hits_lenient <- get_all_unique_ids(pos_hits_list_lenient)
+
+# Function to rename columns with a suffix
+rename_hits <- function(df, suffix) df %>% rename_with(~ paste0(., suffix), -id)
+
+# Rename columns for each comparison in the lenient set for both negative and positive hits
+neg_hits_renamed_lenient <- list(
+  rename_hits(neg_hits_2week_lenient, "_neg_hits_2week"),
+  rename_hits(neg_hits_4week_lenient, "_neg_hits_4week"),
+  rename_hits(neg_hits_6week_lenient, "_neg_hits_6week"),
+  rename_hits(neg_hits_time_replicates_lenient, "_neg_hits_time_replicates"),
+  rename_hits(neg_hits_PERF_lenient, "_neg_hits_PERF"),
+  rename_hits(neg_hits_SF_lenient, "_neg_hits_SF")
+)
+pos_hits_renamed_lenient <- list(
+  rename_hits(pos_hits_2week_lenient, "_pos_hits_2week"),
+  rename_hits(pos_hits_4week_lenient, "_pos_hits_4week"),
+  rename_hits(pos_hits_6week_lenient, "_pos_hits_6week"),
+  rename_hits(pos_hits_time_replicates_lenient, "_pos_hits_time_replicates"),
+  rename_hits(pos_hits_PERF_lenient, "_pos_hits_PERF"),
+  rename_hits(pos_hits_SF_lenient, "_pos_hits_SF")
+)
+
+# Function to merge data frames and filter based on common hits
+merge_hits <- function(common_hits, hits_list) {
+  merged_df <- Reduce(function(x, y) full_join(x, y, by = "id"), hits_list)
+  merged_df %>% filter(id %in% common_hits)
+}
+
+# Merging the data frames for each category of hits
+common_pos_hits_all_df_lenient <- merge_hits(common_pos_hits_all_lenient, pos_hits_renamed_lenient)
+common_neg_hits_all_df_lenient <- merge_hits(common_neg_hits_all_lenient, neg_hits_renamed_lenient)
+at_least_two_pos_hits_df_lenient <- merge_hits(at_least_two_pos_hits_lenient, pos_hits_renamed_lenient)
+at_least_two_neg_hits_df_lenient <- merge_hits(at_least_two_neg_hits_lenient, neg_hits_renamed_lenient)
+all_unique_pos_hits_df_lenient <- merge_hits(all_unique_pos_hits_lenient, pos_hits_renamed_lenient)
+all_unique_neg_hits_df_lenient <- merge_hits(all_unique_neg_hits_lenient, neg_hits_renamed_lenient)
+
+# Rename the ID column in metadata before using it
+colnames(ReadCountsCHOWGLV4) <- gsub("Unique Gene ID v2", "id", colnames(ReadCountsCHOWGLV4))
+
+
+# Function to add metadata to a data frame
+add_metadata <- function(df, metadata_df) {
+  # Prepare metadata to join
+  metadata_to_add <- metadata_df %>%
+    dplyr::select(id, `Gene Symbol / Target Name`, `Gene Name`, `Gene Product`, `Uniprot ID`,
+      Gene_ID_v2, Gene_Name_v2, Product_v2, clustered_nr.hit_v2, clustered_nr.pident_v2,
+      alphalyse.hit_v2, alphalyse.uniprot_v2, alphalyse.pident_v2, seed_tax_id_v2,
+      seed_ortholog_v2, COG_category_v2, Description_v2, Preferred_name_v2,
+      GOs_v2, EC_v2, KEGG_ko_v2, KEGG_Pathway_v2, KEGG_Module_v2, KEGG_Reaction_v2,
+      KEGG_rclass_v2, BRITE_v2, KEGG_TC_v2, CAZy_v2, BiGG_Reaction_v2, PFAMs_v2
+    ) %>%
+    distinct(id, .keep_all = TRUE)
+
+  # Join the metadata
+  df_joined <- left_join(df, metadata_to_add, by = "id")
+
+  # Reorder: id + metadata columns + rest
+  metadata_cols <- setdiff(names(metadata_to_add), "id")
+  other_cols <- setdiff(names(df_joined), c("id", metadata_cols))
+  df_ordered <- df_joined[, c("id", metadata_cols, other_cols)]
+
+  return(df_ordered)
+}
+
+
+
+
+############### Error Handling ############
+# # Ensure the 'id' column exists before metadata merging
+# ensure_id_column <- function(df) {
+#   if (!"id" %in% colnames(df)) {
+#     stop("Column 'id' not found in dataframe. Cannot perform metadata merge.")
+#   }
+#   return(df)
+# }
+# 
+# # Apply this to all dataframes before metadata addition
+# common_pos_hits_all_df_lenient <- ensure_id_column(common_pos_hits_all_df_lenient)
+# common_neg_hits_all_df_lenient <- ensure_id_column(common_neg_hits_all_df_lenient)
+# at_least_two_pos_hits_df_lenient <- ensure_id_column(at_least_two_pos_hits_df_lenient)
+# at_least_two_neg_hits_df_lenient <- ensure_id_column(at_least_two_neg_hits_df_lenient)
+# all_unique_pos_hits_df_lenient <- ensure_id_column(all_unique_pos_hits_df_lenient)
+# all_unique_neg_hits_df_lenient <- ensure_id_column(all_unique_neg_hits_df_lenient)
+# ReadCountsCHOWGLV4 <- ensure_id_column(ReadCountsCHOWGLV4)
+
+
+
+# Add metadata from 'ReadCountsCHOWGLV4' to each hits data frame
+common_pos_hits_all_df_lenient <- add_metadata(common_pos_hits_all_df_lenient, ReadCountsCHOWGLV4)
+common_neg_hits_all_df_lenient <- add_metadata(common_neg_hits_all_df_lenient, ReadCountsCHOWGLV4)
+at_least_two_pos_hits_df_lenient <- add_metadata(at_least_two_pos_hits_df_lenient, ReadCountsCHOWGLV4)
+at_least_two_neg_hits_df_lenient <- add_metadata(at_least_two_neg_hits_df_lenient, ReadCountsCHOWGLV4)
+all_unique_pos_hits_df_lenient <- add_metadata(all_unique_pos_hits_df_lenient, ReadCountsCHOWGLV4)
+all_unique_neg_hits_df_lenient <- add_metadata(all_unique_neg_hits_df_lenient, ReadCountsCHOWGLV4)
+
+
+
+# Save the lenient results to an Excel file
+output_file_lenient <- "./output_data/Hit_Calls/04_common_lenient_hits_summary_V1.xlsx"
+wb_lenient <- createWorkbook()
+
+# Function to add worksheet and write data
+addWorksheetAndWrite <- function(wb, sheet, data) {
+  addWorksheet(wb, sheet)
+  writeData(wb, sheet = sheet, data)
+}
+addWorksheetAndWrite(wb_lenient, "Common_Positive_Hits_All", common_pos_hits_all_df_lenient)
+addWorksheetAndWrite(wb_lenient, "Common_Negative_Hits_All", common_neg_hits_all_df_lenient)
+addWorksheetAndWrite(wb_lenient, "At_Least_Two_Positive_Hits", at_least_two_pos_hits_df_lenient)
+addWorksheetAndWrite(wb_lenient, "At_Least_Two_Negative_Hits", at_least_two_neg_hits_df_lenient)
+addWorksheetAndWrite(wb_lenient, "All_Unique_Positive_Hits", all_unique_pos_hits_df_lenient)
+addWorksheetAndWrite(wb_lenient, "All_Unique_Negative_Hits", all_unique_neg_hits_df_lenient)
+
+# Save the workbook
+saveWorkbook(wb_lenient, output_file_lenient, overwrite = TRUE)
+
+```
+
+\
+
+## 3.1 Gene Scoring and Ranking  
+
+\
+
+To prioritize gene candidates for further wet lab validation, we implemented a custom gene ranking framework using the following key steps:
+
+- **Input Data**  
+    - MAGeCK hit tables were imported for all experimental comparisons.  
+    - Log₂ fold changes (LFC) for each gene were extracted separately for enriched (positive) and depleted (negative) hits.  
+    - Precomputed comparison quality weights were loaded to incorporate sequencing quality and replicate count information into gene-level scoring.
+
+- **Calculation of Weighted Gene Scores**  
+    - For each gene, weighted scores were calculated across all comparisons using the following logic:  
+        - The absolute LFC in each comparison was scaled relative to the gene’s smallest non-zero LFC.
+        - Comparison-specific quality weights were applied to each scaled LFC to account for differences in data quality and reproducibility.  
+        - Scores were summed across comparisons where the gene appeared as a hit.  
+    - This ensures that genes with strong, reproducible effects in high-quality comparisons receive higher scores.
+
+- **Incorporating Replicate Information**  
+    - The occurrence of each gene across comparisons was tracked, and the number of comparisons where the gene appeared as a hit was included as a metric.  
+    - A detailed list of comparisons contributing to each gene’s score was also recorded for traceability.
+
+- **Final Output**  
+    - Final gene-level summary tables include:  
+        - Calculated weighted gene scores for both enrichment and depletion (positive and negative selection).  
+        - The number of comparisons contributing to each gene’s score.  
+        - The specific comparisons in which each gene was identified as a hit.  
+    - Results were exported as Excel files for downstream analysis and visualization.
+
+> **Note:** This section presents *example code*. Final gene scores and rankings presented here may differ slightly based on final selection thresholds biological investigation.
+
+
+```{r}
+### Hits are re-extracted from hit_names_list_lenient
+
+# Step 1: Extract lists of negative and positive hits for each time point from `hit_names_list_lenient`
+neg_hits_2week_lenient <- hit_names_list_lenient[[1]]$neg_hits
+neg_hits_4week_lenient <- hit_names_list_lenient[[2]]$neg_hits
+neg_hits_6week_lenient <- hit_names_list_lenient[[3]]$neg_hits
+neg_hits_time_replicates_lenient <- hit_names_list_lenient[[4]]$neg_hits
+neg_hits_PERF_lenient <- hit_names_list_lenient[[5]]$neg_hits
+neg_hits_SF_lenient <- hit_names_list_lenient[[6]]$neg_hits
+
+pos_hits_2week_lenient <- hit_names_list_lenient[[1]]$pos_hits
+pos_hits_4week_lenient <- hit_names_list_lenient[[2]]$pos_hits
+pos_hits_6week_lenient <- hit_names_list_lenient[[3]]$pos_hits
+pos_hits_time_replicates_lenient <- hit_names_list_lenient[[4]]$pos_hits
+pos_hits_PERF_lenient <- hit_names_list_lenient[[5]]$pos_hits
+pos_hits_SF_lenient <- hit_names_list_lenient[[6]]$pos_hits
+
+# Create lists of negative and positive hits for ease of access in later steps
+neg_hits_list_lenient <- list(
+  "2 week" = neg_hits_2week_lenient, "4 week" = neg_hits_4week_lenient, "6 week" = neg_hits_6week_lenient,
+  "time replicates" = neg_hits_time_replicates_lenient, "Perfusion" = neg_hits_PERF_lenient, "Shake-Flask" = neg_hits_SF_lenient
+)
+
+pos_hits_list_lenient <- list(
+  "2 week" = pos_hits_2week_lenient, "4 week" = pos_hits_4week_lenient, "6 week" = pos_hits_6week_lenient,
+  "time replicates" = pos_hits_time_replicates_lenient, "Perfusion" = pos_hits_PERF_lenient, "Shake-Flask" = pos_hits_SF_lenient
+)
+
+# Step 2: Extract unique gene IDs for positive and negative hits
+get_all_unique_ids <- function(hits_list) {
+  unique(unlist(lapply(hits_list, function(df) df$id)))
+}
+
+unique_genes_neg_lenient <- get_all_unique_ids(neg_hits_list_lenient)
+unique_genes_pos_lenient <- get_all_unique_ids(pos_hits_list_lenient)
+
+# Step 3: Define a function to extract log fold change (lfc) values
+extract_lfc_values <- function(unique_genes, hits_list, prefix) {
+  lfc_data <- data.frame(id = unique_genes)
+  
+  for (comparison in names(hits_list)) {
+    # Merge to get the lfc values for each gene in each comparison
+    comparison_lfc <- hits_list[[comparison]] %>%
+      dplyr::select(id, lfc = paste0(prefix, ".lfc"))
+    lfc_data <- left_join(lfc_data, comparison_lfc, by = "id")
+    # Rename the lfc column to include the comparison name
+    colnames(lfc_data)[ncol(lfc_data)] <- paste0(comparison, ".lfc")
+  }
+  
+  # Replace NAs with 0 for genes that don't have values in certain comparisons
+  lfc_data[is.na(lfc_data)] <- 0
+  
+  return(lfc_data)
+}
+
+# Extract lfc values for negative and positive hits (lenient filtering)
+lfc_data_neg_lenient <- extract_lfc_values(unique_genes_neg_lenient, neg_hits_list_lenient, "neg")
+lfc_data_pos_lenient <- extract_lfc_values(unique_genes_pos_lenient, pos_hits_list_lenient, "pos")
+
+# Step 4: Read weights for each comparison (computed elsewhere)
+# Read the Excel file
+weights_df <- read_excel("./input_data/00_weights_comps.xlsx")  # Update path as needed
+
+# Create named numeric vectors
+weights_neg_lenient <- setNames(weights_df$weights_neg_lenient, weights_df$Comparison)
+weights_pos_lenient <- setNames(weights_df$weights_pos_lenient, weights_df$Comparison)
+
+# (Optional) View the objects to verify
+print(weights_neg_lenient)
+print(weights_pos_lenient)
+
+# Step 5: Scoring function to use only LFC
+calculate_weighted_score <- function(lfc_data, weights) {
+  # Scale LFC values per gene to have a minimum of 1
+  lfc_scaled <- lfc_data
+  for (i in 1:nrow(lfc_data)) {
+    non_zero_lfc <- abs(lfc_data[i, -1][lfc_data[i, -1] != 0])  # Exclude ID column and zeros
+    if (length(non_zero_lfc) > 0) {
+      min_lfc <- min(non_zero_lfc)
+      lfc_scaled[i, -1] <- ifelse(lfc_data[i, -1] != 0, abs(lfc_data[i, -1]) / min_lfc, 0)
+    }
+  }
+  
+  # Apply weights to scaled LFC values
+  score <- rowSums(sapply(names(weights), function(comp) {
+    lfc_value <- lfc_scaled[[paste0(comp, ".lfc")]]
+    ifelse(lfc_value != 0, weights[comp] * lfc_value, 0)  # Combine scaled LFC and weights
+  }))
+  
+  return(score)
+}
+
+# Calculate weighted scores for negative and positive hits (lenient filtering)
+weighted_scores_neg_lenient <- calculate_weighted_score(lfc_data_neg_lenient, weights_neg_lenient)
+weighted_scores_pos_lenient <- calculate_weighted_score(lfc_data_pos_lenient, weights_pos_lenient)
+
+# Step 6: Update binary matrices with the new weighted scores and comparison details
+# Negative hits
+binary_matrix_neg_lenient <- data.frame(id = unique_genes_neg_lenient)
+binary_matrix_neg_lenient$F.Score.neg <- weighted_scores_neg_lenient
+binary_matrix_neg_lenient$Comparison.Count.neg <- rowSums(sapply(neg_hits_list_lenient, function(df) unique_genes_neg_lenient %in% df$id))
+binary_matrix_neg_lenient$Comp.neg <- apply(sapply(neg_hits_list_lenient, function(df) unique_genes_neg_lenient %in% df$id), 1, function(row) {
+  paste(names(weights_neg_lenient)[row == 1], collapse = ", ")
+})
+
+# Positive hits
+binary_matrix_pos_lenient <- data.frame(id = unique_genes_pos_lenient)
+binary_matrix_pos_lenient$F.Score.pos <- weighted_scores_pos_lenient
+binary_matrix_pos_lenient$Comparison.Count.pos <- rowSums(sapply(pos_hits_list_lenient, function(df) unique_genes_pos_lenient %in% df$id))
+binary_matrix_pos_lenient$Comp.pos <- apply(sapply(pos_hits_list_lenient, function(df) unique_genes_pos_lenient %in% df$id), 1, function(row) {
+  paste(names(weights_pos_lenient)[row == 1], collapse = ", ")
+})
+
+# Step 7: Update the merging functions to include the new scores
+merge_scores_neg_lenient <- function(df) {
+  df %>% left_join(binary_matrix_neg_lenient %>% dplyr::select(id, F.Score.neg, Comparison.Count.neg, Comp.neg), by = "id")
+}
+merge_scores_pos_lenient <- function(df) {
+  df %>% left_join(binary_matrix_pos_lenient %>% dplyr::select(id, F.Score.pos, Comparison.Count.pos, Comp.pos), by = "id")
+}
+
+
+# Apply merge to each result data frame to include the new scores
+common_neg_hits_all_df_lenient <- merge_scores_neg_lenient(common_neg_hits_all_df_lenient)
+at_least_two_neg_hits_df_lenient <- merge_scores_neg_lenient(at_least_two_neg_hits_df_lenient)
+all_unique_neg_hits_df_lenient <- merge_scores_neg_lenient(all_unique_neg_hits_df_lenient)
+
+common_pos_hits_all_df_lenient <- merge_scores_pos_lenient(common_pos_hits_all_df_lenient)
+at_least_two_pos_hits_df_lenient <- merge_scores_pos_lenient(at_least_two_pos_hits_df_lenient)
+all_unique_pos_hits_df_lenient <- merge_scores_pos_lenient(all_unique_pos_hits_df_lenient)
+
+# Step 8: Export the updated data frames with new scores to Excel
+output_file_lenient_v3 <- "./output_data/Hit_Calls/05_scored_common_lenient_hits_summary_V1.xlsx"
+wb_lenient_v3 <- createWorkbook()
+
+# Function to add worksheet and write data
+addWorksheetAndWrite_v3 <- function(wb, sheet, data) {
+  addWorksheet(wb, sheet)
+  writeData(wb, sheet = sheet, data)
+}
+
+# Write each updated data frame to the workbook
+addWorksheetAndWrite_v3(wb_lenient_v3, "Common_Positive_Hits_All", common_pos_hits_all_df_lenient)
+addWorksheetAndWrite_v3(wb_lenient_v3, "Common_Negative_Hits_All", common_neg_hits_all_df_lenient)
+addWorksheetAndWrite_v3(wb_lenient_v3, "At_Least_Two_Positive_Hits", at_least_two_pos_hits_df_lenient)
+addWorksheetAndWrite_v3(wb_lenient_v3, "At_Least_Two_Negative_Hits", at_least_two_neg_hits_df_lenient)
+addWorksheetAndWrite_v3(wb_lenient_v3, "All_Unique_Positive_Hits", all_unique_pos_hits_df_lenient)
+addWorksheetAndWrite_v3(wb_lenient_v3, "All_Unique_Negative_Hits", all_unique_neg_hits_df_lenient)
+
+# Save the workbook
+saveWorkbook(wb_lenient_v3, output_file_lenient_v3, overwrite = TRUE)
+```
+
+
+\
+
+## 3.2 Final Gene List with prioritization
+
+\
+
+This section describes the final prioritization of gene hits based on calculated scores using a clustering-based filtering strategy.  
+
+- **Input Data**  
+    - Gene-level scores were imported from the previous analysis steps.  
+    - Separate computed statistics by MAGeCK were analyzed for negative selection (depletion) and positive selection (enrichment).
+
+- **Clustering and Cutoff Calculation**  
+    - **KMeans Clustering** was applied to partition genes into six distinct clusters based on their calculated scores.  
+    - The cluster with the **lowest mean score** was identified and used to determine a cutoff threshold.  
+    - Genes assigned to this lowest cluster and scoring below the cutoff were excluded from final prioritized hit lists.  
+    - This ensures that only genes with strong and consistent effects across comparisons were retained.
+
+- **Visualizations**  
+    - **Density Plots** were generated to visualize score distributions across all clusters and after excluding the lowest cluster.  
+    - **Violin Plots** were produced to illustrate the distribution of scores within each cluster, aiding in the visualization of score spread and cluster separation.  
+    - All plots were exported.
+
+- **Final Output**  
+    - Filtered gene hit lists were exported as Excel files, including only genes above the calculated cutoff threshold.  
+    - These final prioritized gene sets represent the most promising candidates for further experimental validation based on their performance across comparisons and scoring metrics.
+
+> **Note:** The presented code and results are based on example data. Final gene lists and scores used for reporting may vary slightly based on updated input data and thresholds applied during final review and biological investigation.
+
+
+```{r}
+
+
+perform_clustering_and_visualization <- function(input_df, score_column, n_clusters = 6, title = "Scores", output_file = "./output_data/06_cluster_analysis_results.xlsx") {
+  
+  # Create export folder for plots
+  dir.create("./output_data/Scoring_Plots", recursive = TRUE, showWarnings = FALSE)
+
+  scores <- input_df[[score_column]]
+  scores_matrix <- matrix(scores, ncol = 1)
+  kmeans_result <- kmeans(scores_matrix, centers = n_clusters, nstart = 25)
+  input_df$Cluster <- kmeans_result$cluster
+
+  cluster_order <- order(tapply(scores, input_df$Cluster, mean))
+  remap <- setNames(seq_along(cluster_order), cluster_order)
+  input_df$Cluster <- remap[as.character(input_df$Cluster)]
+
+  cutoff <- max(input_df[[score_column]][input_df$Cluster == 1])
+  input_df$AboveCutoff <- input_df[[score_column]] > cutoff
+
+  wb <- createWorkbook()
+  addWorksheet(wb, paste0(title, "_Clusters"))
+  writeData(wb, paste0(title, "_Clusters"), input_df)
+  saveWorkbook(wb, output_file, overwrite = TRUE)
+
+  cluster_colors <- c(
+    "1" = "#d62728",
+    "2" = "#1f77b4",
+    "3" = "#ff7f0e",
+    "4" = "#aec7e8",
+    "5" = "#7f7f7f",
+    "6" = "#17becf"
+  )
+
+  x_limits <- range(input_df[[score_column]])
+
+  # Plot: All clusters
+  p_all <- ggplot(input_df, aes(x = !!sym(score_column), fill = as.factor(Cluster), color = as.factor(Cluster))) +
+    geom_density(alpha = 0.3, linewidth = 1) +
+    geom_vline(xintercept = cutoff, color = "#d62728", linetype = "dashed", linewidth = 1) +
+    scale_fill_manual(values = cluster_colors) +
+    scale_color_manual(values = cluster_colors) +
+    coord_cartesian(xlim = x_limits) +
+    scale_x_continuous(breaks = pretty(x_limits, n = 5)) +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.line = element_line(colour = "black", linewidth = 2),
+      axis.text = element_text(size = 22),
+      axis.title = element_text(size = 22, face = "bold"),
+      plot.title = element_text(size = 22, face = "bold"),
+      legend.title = element_text(size = 22),
+      legend.text = element_text(size = 22)
+    ) +
+    labs(
+      title = paste0(title, " Clusters (All)"),
+      x = "Score",
+      y = "Density",
+      fill = "Cluster",
+      color = "Cluster"
+    )
+
+  ggsave(
+    filename = paste0("./output_data/Scoring_Plots/", gsub(" ", "_", title), "_Density_All.png"),
+    plot = p_all, width = 7, height = 5, dpi = 300
+  )
+
+  # Plot: Exclude lowest cluster
+  df_excl_low <- input_df %>% filter(Cluster != 1)
+  p_excl <- ggplot(df_excl_low, aes(x = !!sym(score_column), fill = as.factor(Cluster), color = as.factor(Cluster))) +
+    geom_density(alpha = 0.3, linewidth = 1) +
+    scale_fill_manual(values = cluster_colors) +
+    scale_color_manual(values = cluster_colors) +
+    coord_cartesian(xlim = x_limits) +
+    scale_x_continuous(breaks = pretty(x_limits, n = 5)) +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.line = element_line(colour = "black", linewidth = 2),
+      axis.text = element_text(size = 22),
+      axis.title = element_text(size = 22, face = "bold"),
+      plot.title = element_text(size = 22, face = "bold"),
+      legend.title = element_text(size = 22),
+      legend.text = element_text(size = 22)
+    ) +
+    labs(
+      title = paste0(title, " Clusters (Excl. Lowest)"),
+      x = "Score",
+      y = "Density",
+      fill = "Cluster",
+      color = "Cluster"
+    )
+
+  ggsave(
+    filename = paste0("./output_data/Scoring_Plots/", gsub(" ", "_", title), "_Density_Excl_Lowest.png"),
+    plot = p_excl, width = 7, height = 5, dpi = 300
+  )
+
+  return(input_df)
+}
+
+# Example Calls
+updated_neg_hits <- perform_clustering_and_visualization(
+  input_df = all_unique_neg_hits_df_lenient,
+  score_column = "F.Score.neg",
+  n_clusters = 6,
+  title = "Negative Scores",
+  output_file = "./output_data/Hit_Calls/06_negative_cluster_analysis_final.xlsx"
+)
+
+updated_pos_hits <- perform_clustering_and_visualization(
+  input_df = all_unique_pos_hits_df_lenient,
+  score_column = "F.Score.pos",
+  n_clusters = 6,
+  title = "Positive Scores",
+  output_file = "./output_data/Hit_Calls/07_positive_cluster_analysis_final.xlsx"
+)
+
+# ---------------- Violin Plot Section ----------------
+
+plot_composite_violin <- function(df, score_column, group_column = "Cluster", 
+                                  title = "Score Distribution", 
+                                  y_label = "Score",
+                                  output_file = NULL,
+                                  fixed_ylim = NULL) {
+  
+  cluster_colors <- c(
+    "1" = "#d62728",
+    "2" = "#1f77b4",
+    "3" = "#ff7f0e",
+    "4" = "#aec7e8",
+    "5" = "#7f7f7f",
+    "6" = "#17becf"
+  )
+  
+  df[[group_column]] <- factor(df[[group_column]])
+  cluster_order <- df %>%
+    group_by(!!sym(group_column)) %>%
+    summarise(mean_val = mean(!!sym(score_column), na.rm = TRUE)) %>%
+    arrange(mean_val) %>%
+    pull(!!sym(group_column))
+  
+  df[[group_column]] <- factor(df[[group_column]], levels = cluster_order)
+
+  p <- ggplot(df, aes_string(x = group_column, y = score_column, fill = group_column)) +
+    geom_violin(trim = FALSE, scale = "width", color = "black", width = 1) +
+    scale_fill_manual(values = cluster_colors) +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.title = element_text(size = 22, face = "bold"),
+      axis.text = element_text(size = 22),
+      plot.title = element_text(size = 22, face = "bold", hjust = 0.5),
+      axis.line = element_line(colour = "black", linewidth = 2),
+      legend.position = "none"
+    ) +
+    labs(title = title, y = y_label, x = "Cluster")
+
+  if (!is.null(fixed_ylim)) {
+    p <- p + coord_cartesian(ylim = fixed_ylim)
+  }
+
+  if (!is.null(output_file)) {
+    ggsave(output_file, p, dpi = 300, width = 5, height = 6)
+  }
+
+  return(p)
+}
+
+# Filter final hits
+filtered_final_neg_hits <- updated_neg_hits %>% filter(AboveCutoff == TRUE)
+filtered_final_pos_hits <- updated_pos_hits %>% filter(AboveCutoff == TRUE)
+
+# Export Violin Plots to Scoring_Plots Folder
+plot_composite_violin(
+  df = updated_neg_hits,
+  score_column = "F.Score.neg",
+  title = "Negative Score Clusters",
+  y_label = "Score",
+  fixed_ylim = c(0, 8),
+  output_file = "./output_data/Scoring_Plots/violin_neg_scores.png"
+)
+
+plot_composite_violin(
+  df = updated_pos_hits,
+  score_column = "F.Score.pos",
+  title = "Positive Score Clusters",
+  y_label = "Score",
+  fixed_ylim = c(0, 8),
+  output_file = "./output_data/Scoring_Plots/violin_pos_scores.png"
+)
+
+
+```
+
+\
+
+
+## 3.3 Individual comparisons
+
+\
+
+
+This section presents gene-level visualizations of CRISPR screen results for each experimental comparison. Genes were classified and plotted based on their statistical significance and control category, enabling a clear distinction between biological effects and background noise.  
+
+- **Key Analysis Steps**  
+    - Gene rankings were based on the **α-RRA score** and **α-mean log₂ fold change (LFC)** derived from MAGeCK analysis.  
+    - Genes were grouped into four categories for visualization:  
+        - *Significant Hits* (orange): Genes meeting the significance criteria defined previously.  
+        - *Non-Targeting Controls* (black): sgRNAs designed not to target any genomic sequence.  
+        - *Intron-Targeting Controls* (teal): sgRNAs introducing DNA breaks in non-coding intronic regions, serving as functional negative controls.  
+        - *Not Significant* (gray): Genes not meeting statistical significance thresholds.  
+
+- **Visualization Approach**  
+    - Scatter plots were generated for each comparison, plotting the **α-RRA score** (x-axis) against the **α-mean log₂ fold change** (y-axis).  
+    - These plots highlight the concordance between effect size and statistical significance.  
+    - Non-targeting and intron-targeting controls provided empirical reference groups to calibrate significance thresholds and evaluate potential false positives.  
+
+> **Note:** The intron-targeting controls, which introduce CRISPR-induced double-strand breaks without disrupting coding sequences, provide a more stringent null distribution than traditional non-targeting controls. This approach ensures confident separation of true hits from artifacts caused by editing toxicity or sampling variation.  
+
+**Example Visualizations**  
+- Individual plots were generated for the following comparisons:  
+    - Two Week vs. Plasmid  
+    - Four Week vs. Plasmid  
+    - Six Week vs. Plasmid  
+    - Time Replicates  
+    - Perfusion  
+    - Shake Flask  
+
+All figures were saved to the `output_data/FastCHO_Plots/` directory for reporting purposes.
+
+> **Note:** These plots are based on current analysis outputs. Final figures may vary based on updated thresholds and input datasets.
+
+
+```{r}
+# Output directory for plots
+output_dir <- "./output_data/FastCHO_Plots/"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Define color palette for categories
+custom_colors <- c(
+  "Significant"      = "#ff7f0e",  # Orange
+  "Non-Targeting"    = "#000000",  # Black
+  "Intron-Targeting" = "#17becf",  # Teal
+  "Not Significant"  = "#7f7f7f"   # Gray
+)
+
+# Data Processing Functions
+process_data_neg <- function(df) {
+  df %>%
+    mutate(
+      significant_neg = (neg.fdr < 0.05 | (neg.p.value < 0.025 & neg.lfc < 0)),
+      category_neg = case_when(
+        str_detect(id, "INT") ~ "Intron-Targeting",
+        str_detect(id, "Non_targeting") ~ "Non-Targeting",
+        significant_neg ~ "Significant",
+        TRUE ~ "Not Significant"
+      )
+    )
+}
+
+process_data_pos <- function(df) {
+  df %>%
+    mutate(
+      significant_pos = (pos.fdr < 0.05 | (pos.p.value < 0.025 & pos.lfc > 1)),
+      category_pos = case_when(
+        str_detect(id, "INT") ~ "Intron-Targeting",
+        str_detect(id, "Non_targeting") ~ "Non-Targeting",
+        significant_pos ~ "Significant",
+        TRUE ~ "Not Significant"
+      )
+    )
+}
+
+# Plot Generation Function
+generate_fastcho_plot <- function(df_combined, title, filename) {
+  df_combined_clean <- df_combined %>%
+    mutate(category = recode(category,
+                             "INT" = "Intron-Targeting",
+                             "Non_targeting" = "Non-Targeting"))
+
+  p <- ggplot(df_combined_clean, aes(x = score, y = lfc)) +
+    geom_point(data = filter(df_combined_clean, category == "Not Significant"),
+               aes(color = category), size = 0.8, alpha = 0.15) +
+    geom_point(data = filter(df_combined_clean, category == "Non-Targeting"),
+               aes(color = category), size = 1.3, alpha = 0.8) +
+    geom_point(data = filter(df_combined_clean, category == "Intron-Targeting"),
+               aes(color = category), size = 1.3, alpha = 0.8) +
+    geom_point(data = filter(df_combined_clean, category == "Significant"),
+               aes(color = category), size = 1.4, alpha = 0.8) +
+    scale_color_manual(values = custom_colors) +
+    labs(
+      x = expression(alpha*"-RRA Score"),
+      y = expression(alpha*"-Mean log"[2]*" Fold Change"),
+      color = "Category",
+      title = title
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      panel.grid = element_blank(),
+      axis.title = element_text(size = 16, face = "bold"),
+      axis.text = element_text(size = 13, face = "bold"),
+      axis.line = element_line(size = 1.2, color = "black"),
+      legend.title = element_text(size = 13, face = "bold"),
+      legend.text = element_text(size = 12),
+      legend.position = c(0.95, 0.05),
+      legend.justification = c("right", "bottom"),
+      legend.background = element_rect(fill = "white", color = "black", size = 0.4),
+      plot.margin = margin(10, 10, 10, 10)
+    )
+
+  ggsave(filename = file.path(output_dir, filename), plot = p, width = 6.5, height = 4.8, dpi = 600)
+}
+
+# List of Comparisons
+comparisons <- list(
+  "2week_vs_plasmid" = mageck_results_list$'2week_vs_plasmid',
+  "4week_vs_plasmid" = mageck_results_list$'4week_vs_plasmid',
+  "6week_vs_plasmid" = mageck_results_list$'6week_vs_plasmid',
+  "time_replicates"  = mageck_results_list$'time_replicates',
+  "Perfusion"        = mageck_results_list$'Perfusion',
+  "Shake_Flask"      = mageck_results_list$'Shake_Flask'
+)
+
+
+# ################### TroubleShooting ####################
+# sapply(comparisons, function(df) all(c("neg.score", "neg.lfc", "pos.score", "pos.lfc") %in% colnames(df)))
+# sapply(comparisons, function(df) {
+#   all(!is.na(df$neg.score)) && all(!is.na(df$neg.lfc))
+# })
+# 
+# sapply(comparisons, function(df) {
+#   all(!is.na(df$neg.score)) && all(!is.na(df$neg.lfc))
+# })
+
+# Main Loop to Process and Plot
+for (comp_name in names(comparisons)) {
+  df_raw <- comparisons[[comp_name]]
+  
+  # Process Data
+  df_neg <- process_data_neg(df_raw)
+  df_pos <- process_data_pos(df_raw)
+  
+  # Combine Negative and Positive using Base R
+  df_combined <- df_neg[, c("id", "neg.score", "neg.lfc", "category_neg")]
+  colnames(df_combined) <- c("id", "score", "lfc", "category")
+  
+  df_pos_combined <- df_pos[, c("id", "pos.score", "pos.lfc", "category_pos")]
+  colnames(df_pos_combined) <- c("id", "score", "lfc", "category")
+  
+  df_combined <- rbind(df_combined, df_pos_combined)
+  
+  # Generate and Save Plot
+  generate_fastcho_plot(
+    df_combined, 
+    title = paste("CRISPR Screen -", comp_name),
+    filename = paste0(comp_name, "_FastCHO.png")
+  )
+}
+
+
+
+```
+
+\
+
+# 4 Functionalization of Results
+
+\
+
+## 4.1 Gene Set Enrichment Analysis (GSEA) 
+
+
+\
+
+To understand the broader biological processes impacted by gene knockouts, a Gene Set Enrichment Analysis (GSEA) was performed based on the mean log₂ fold changes from the CRISPR screen.  
+
+- **Key Analysis Steps**  
+    - Gene-level log₂ fold changes were obtained from the MAGeCK analysis using the Time Replicates comparison.  
+    - Genes were ranked by their positive selection log₂ fold changes to identify pathways associated with enhanced growth phenotypes.  
+    - Gene symbols were mapped to Entrez IDs to enable KEGG pathway enrichment analysis.  
+    - The **clusterProfiler** R package was used to perform GSEA against the KEGG pathway database.  
+    - Pathways were classified and filtered using custom categories including *Metabolism*, *Genetic Information Processing*, *Environmental Information Processing*, and *Cellular Processes* for improved interpretability.  
+
+- **Visualization Approach**  
+    - Dot plots were generated to visualize the top 10 enriched (upregulated) and depleted (downregulated) pathways based on normalized enrichment scores (NES).  
+    - Pathway significance was represented by adjusted p-values (Benjamini-Hochberg correction), and dot sizes reflected the size of the gene sets involved.  
+    - These visualizations provided insights into the biological processes most strongly associated with gene knockouts promoting or impairing cell growth.  
+
+- **Results Summary**  
+    - **Enriched Pathways (Positive Association with Growth):**  
+        - Key metabolic and stress-response pathways showed enrichment, indicating that knockouts in these pathways may alleviate cellular burdens or optimize resource allocation under the tested conditions.  
+    - **Depleted Pathways (Negative Association with Growth):**  
+        - Pathways related to essential cellular processes and genetic information handling were commonly depleted, highlighting genes critical for survival and proliferation.  
+
+> **Note:** This analysis provides a high-level functional overview. Specific pathway enrichment results are available in the generated dot plots and supplementary data tables.  
+
+
+```{r}
+
+
+# Output Directory
+output_dir <- "./output_data/FastCHO_GSEA_Plots/"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Color Gradient for FastCHO Dotplots
+color_low <- "#7f7f7f"
+color_high <- "#ff7f0e"
+
+# Step 1: Read MAGeCK Results
+mageck_file <- "./input_data/MAGeCK-output/Time_Repsvsplasmid_GSEA/MAGeCKpseudoreplicates.gene_summary.txt"
+mageck_data <- read_mageck_summary(mageck_file)
+
+# Add metadata if needed
+mageck_data <- add_metadata(mageck_data, ReadCountsCHOWGLV4)
+
+# Step 2: Create Ranked Gene List for GSEA
+ranked_gene_list <- mageck_data %>%
+  arrange(desc(pos.lfc)) %>%
+  dplyr::select(Preferred_name_v2, pos.lfc)
+
+gene_list <- ranked_gene_list$pos.lfc
+names(gene_list) <- ranked_gene_list$Preferred_name_v2
+
+# Step 3: Convert Gene Symbols to Entrez IDs
+entrez_ids <- bitr(names(gene_list), fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+gene_list <- gene_list[entrez_ids$SYMBOL]
+names(gene_list) <- entrez_ids$ENTREZID
+
+# Step 4: Run KEGG GSEA
+gsea_kegg_results <- gseKEGG(
+  geneList = gene_list,
+  organism = "hsa",
+  keyType = "ncbi-geneid",
+  pvalueCutoff = 0.2,
+  pAdjustMethod = "BH",
+  verbose = FALSE
+)
+
+
+# Function to filter the KEGG results based on the specified categories from the CSV
+filter_kegg_results_with_categories <- function(kegg_result, categories, category_data) {
+  
+  # Merge the KEGG results with the category data based on pathway ID
+  kegg_result@result <- merge(kegg_result@result, category_data, by.x = "ID", by.y = "pathway_id", all.x = TRUE)
+  
+  # Handle multiple categories: retain all categories by concatenating them
+  kegg_result@result$category <- sapply(kegg_result@result$category, function(cat) {
+    if (is.na(cat)) {
+      return("Uncategorized")  # Replace NA with 'Uncategorized'
+    } else {
+      # Retain all categories, assuming categories are separated by commas or semicolons
+      return(paste(unique(strsplit(cat, ";|,")[[1]]), collapse = ","))  # Concatenate categories if there are multiples
+    }
+  })
+  
+  # Filtering: retain only the rows where at least one of the categories matches
+  filtered_result <- kegg_result@result[sapply(kegg_result@result$category, function(cat) {
+    cat_list <- strsplit(cat, ",")[[1]]  # Split the concatenated categories
+    return(any(cat_list %in% categories) | "Uncategorized" %in% cat_list)  # Retain rows if any category matches
+  }), ]
+  
+  # Return the filtered KEGG result object
+  kegg_result@result <- filtered_result
+  return(kegg_result)
+}
+
+# Filter Results for Specified KEGG Categories
+kegg_category_data <- read.csv("./input_data/kegg_pathway_categories.csv", stringsAsFactors = FALSE)
+kegg_categories <- c("Metabolism", "Genetic Information Processing", 
+                     "Environmental Information Processing", "Cellular Processes")
+
+gsea_kegg_results_filtered <- filter_kegg_results_with_categories(
+  gsea_kegg_results, 
+  kegg_categories, 
+  kegg_category_data
+)
+
+# Step 5: Prepare Data for FastCHO Dotplots
+gsea_results_df <- gsea_kegg_results_filtered@result
+
+upregulated_pathways <- gsea_results_df %>%
+  filter(NES > 0) %>%
+  arrange(p.adjust) %>%
+  head(10)
+
+downregulated_pathways <- gsea_results_df %>%
+  filter(NES < 0) %>%
+  arrange(p.adjust) %>%
+  head(10)
+
+# Step 6: Generate and Save FastCHO Dotplots
+generate_fastcho_dotplot <- function(result_df, plot_title, filename) {
+  gsea_result_obj <- gsea_kegg_results_filtered
+  gsea_result_obj@result <- result_df
+  
+  p <- dotplot(gsea_result_obj, showCategory = 10, color = "p.adjust", label_format = 40) +
+    scale_color_gradient(low = color_low, high = color_high) +
+    ggtitle(plot_title) +
+    theme_minimal(base_size = 15) +
+    theme(
+      axis.text.y = element_text(size = 18, face = "bold"),
+      axis.text.x = element_text(size = 18, face = "bold"),
+      axis.title.x = element_text(size = 18, face = "bold"),
+      axis.title.y = element_text(size = 18, face = "bold"),
+      plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+      legend.title = element_text(size = 18),
+      legend.text = element_text(size = 18),
+      plot.margin = margin(10, 15, 10, 10)
+    )
+  
+  ggsave(filename = file.path(output_dir, filename), plot = p, width = 10, height = 6.5, dpi = 300)
+}
+
+# Enriched (Upregulated) Pathways Plot
+if (nrow(upregulated_pathways) > 0) {
+  generate_fastcho_dotplot(
+    upregulated_pathways,
+    "Pathway KOs Positively Associated with Growth",
+    "Enriched_Pathways_Dotplot.png"
+  )
+} else {
+  cat("No upregulated pathways found.\n")
+}
+
+# Depleted (Downregulated) Pathways Plot
+if (nrow(downregulated_pathways) > 0) {
+  generate_fastcho_dotplot(
+    downregulated_pathways,
+    "Pathway KOs Negatively Associated with Growth",
+    "Depleted_Pathways_Dotplot.png"
+  )
+} else {
+  cat("No downregulated pathways found.\n")
+}
+
+```
+
+\
+
+### 4.1.1 Pathway Visualizations
+
+\
+
+To provide an intuitive understanding of how gene knockouts affect cellular pathways, KEGG pathway visualizations were generated using the **pathview** R package.  
+
+- **Visualization Workflow**  
+    - Gene log₂ fold change values derived from the MAGeCK analysis were used as input to highlight upregulated and downregulated genes within KEGG pathways.  
+    - Pathways were visualized separately for genes showing **positive selection** (enhancing growth) and **negative selection** (reducing growth).  
+    - Up to the top 10 most significantly enriched pathways were visualized for each group.  
+    - Visualizations clearly illustrate the impact of gene knockouts at the pathway level, with color gradients indicating the direction and magnitude of fold changes.  
+
+- **Interpretation**  
+    - **Red nodes** typically represent genes with high positive log₂ fold changes, suggesting knockouts that enhance growth.  
+    - **Green nodes** represent genes with negative log₂ fold changes, indicating knockouts detrimental to growth.  
+    - **Gray nodes** represent genes not significantly affected or not covered by the library.  
+
+- **Results Summary**  
+    - **Upregulated Pathways (Positive NES):**  
+        - Visualizations highlight metabolic reprogramming and cellular stress adaptations that may support enhanced growth under experimental conditions.  
+    - **Downregulated Pathways (Negative NES):**  
+        - Essential pathways involved in core cellular functions and genetic information processing were prominent among negatively affected pathways, reflecting their importance for viability.  
+
+> **Note:** Pathway diagrams provide qualitative insights and should be interpreted in the context of the CRISPR library coverage and experimental conditions. Interactive pathway maps and full-resolution images are available in the supplementary Material for detailed review. 
+
+```{r}
+visualize_pathways <- function(gsea_result, gene_list, output_dir, limit = 10) {
+  if (!is.null(gsea_result) && nrow(gsea_result@result) > 0) {
+    # Create the output directory if it doesn't exist
+    if (!dir.exists(output_dir)) {
+      dir.create(output_dir, recursive = TRUE)
+    }
+
+    # Round gene data to one decimal place
+    gene_list_rounded <- round(gene_list, 1)
+    
+    # Set scipen option to prevent scientific notation
+    old_scipen <- getOption("scipen")
+    options(scipen = 999)
+    
+    # Limit to the top 'limit' pathways
+    pathway_ids <- gsea_result@result$ID[1:min(limit, nrow(gsea_result@result))]
+    
+    # Loop through the significant KEGG pathway IDs
+    for (pathway_id in pathway_ids) {
+      tryCatch({
+        # Visualize the pathway using pathview
+        pv_out <- pathview(
+          gene.data = gene_list_rounded,
+          pathway.id = pathway_id,
+          species = "hsa",
+          limit = list(gene = max(abs(gene_list_rounded)), cpd = 1),
+          out.suffix = pathway_id,
+          kegg.native = TRUE,
+          key.align = "x",
+          sig.fig = 2,  # Set significant figures to 2
+          output.dir = output_dir
+        )
+        print(paste("Pathway", pathway_id, "visualized and saved in", output_dir))
+      }, error = function(e) {
+        print(paste("Error visualizing pathway", pathway_id, ":", e$message))
+      })
+    }
+    # Reset scipen option
+    options(scipen = old_scipen)
+  } else {
+    print("No significant pathways found for visualization.")
+  }
+}
+###### Commented for long render time and output bloat ###########
+# # Visualize KEGG pathways for upregulated pathways (positive NES)
+# if (exists("gsea_up") && nrow(gsea_up@result) > 0) {
+#   visualize_pathways(gsea_up, gene_list, "./pathway_visualizations/positive_hits")
+# } else {
+#   cat("No upregulated pathways available for visualization.\n")
+# }
+# 
+# # Visualize KEGG pathways for downregulated pathways (negative NES)
+# if (exists("gsea_down") && nrow(gsea_down@result) > 0) {
+#   visualize_pathways(gsea_down, gene_list, "./pathway_visualizations/negative_hits")
+# } else {
+#   cat("No downregulated pathways available for visualization.\n")
+# }
+```
+
+\
+
+## 4.2 Gene Set Combinations
+
+\
+
+The goal of this section is to demonstrate how gene sets can be constructed by integrating pathway enrichment results. **Please note that the gene sets created here are purely illustrative and do not entirely represent the final gene sets used for downstream biological interpretations or validation experiments.** The final gene sets were carefully curated based on an in-depth biological review and additional validation steps and inlcusion of key growth associated genes not shown in this code example.
+
+---
+
+**Workflow Overview**  
+
+1. **Pathway Enrichment Analysis**  
+   - Example gene sets were constructed by performing KEGG, GO, and Reactome enrichment analyses on the filtered positive hit list with pcutoff set to 1 to include all annotations.  
+   - Pathway terms associated with these genes were extracted and mapped for further grouping.
+
+2. **Gene Set Merging and Redundancy Reduction**  
+   - To reduce redundancy, gene sets with high overlap (Jaccard Index > 0.5) were merged.  
+   - This step combines similar biological processes into larger, non-redundant gene sets.
+
+3. **Filtering for Relevant Biological Themes**  
+   - Example filtering was applied based on keyword patterns related to growth, proliferation, metabolism, and key signaling pathways.  
+   - This illustrates how specific biological questions can guide the selection of relevant gene sets.
+
+4. **Assigning Functional Groups**  
+   - Pathway terms were further organized into higher-level biological themes using a predefined dictionary of functional groups (e.g., "MAPK signaling", "Cell Cycle Regulation", "Apoptosis and Survival").  
+   - The most frequently occurring theme within a gene set was assigned as its primary group.
+
+5. **Visualization of Group Frequencies**  
+   - A summary of functional group frequencies across all gene sets was generated to identify the dominant biological processes represented in the example sets.
+
+---
+
+**Outputs of This Example Workflow**  
+-  **Mapped Gene-Pathway Relationships**  
+-  **Merged and Filtered Example Gene Sets**  
+-  **Functional Group Assignments for Each Gene Set**  
+-  **Visual Summary of Biological Themes (Grouped Term Frequencies)**  
+
+> **Note:** This workflow is intended to illustrate the steps involved in gene set construction and analysis. The final gene sets used for biological interpretation and experimental validation were derived through additional manual curation and in-depth biological review beyond the processing shown here.
+
+---
+
+**Example Visual Output:**  
+A bar plot summarizing the frequency of assigned biological themes across gene sets helps highlight which processes are most represented in the data. This allows rapid exploration of key functional categories before prioritizing specific genes or pathways for further investigation.
+
+
+```{r}
+# re-factored code
+
+###############################################################################################
+###############################################################################################
+
+###### Add Lenient Tumor Suppressor-Genes ###########
+
+# Define the list of IDs
+ids <- c("choSartG00000065592","choSartG00000043237","choSartG00000057790","choSartG00000005180",
+         "choSartG00000019504","choSartG00000048130","choSartG00000052836","choSartG00000020520",
+         "choSartG00000009612","choSartG00000057791","choSartG00000050155","choSartG00000048931",
+         "choSartG00000060214","choSartG00000004526","choSartG00000007810","choSartG00000038345",
+         "choSartG00000061577","choSartG00000000716","choSartG00000029768","choSartG00000035493",
+         "choSartG00000013113"
+)
+
+# Filter rows from all_unique_pos_hits_df_lenient where "Gene Symbol / Target Name" matches the IDs
+filtered_rows <- updated_pos_hits[
+  updated_pos_hits$`Gene Symbol / Target Name` %in% ids, ]
+
+# Append these rows to filtered_final_pos_hits
+filtered_final_pos_hits <- rbind(filtered_final_pos_hits, filtered_rows)
+
+# Verify the results
+print(nrow(filtered_final_pos_hits))  # Should increase by the number of matching rows (e.g., 21)
+
+###############################################################################################
+
+
+############### Setup and Helper Functions ################
+
+
+# Helper to Write Excel Files
+write_to_excel <- function(data, filename, sheet = "Sheet1") {
+  wb <- createWorkbook()
+  addWorksheet(wb, sheet)
+  writeData(wb, sheet, data)
+  saveWorkbook(wb, file.path("./output_data/Gene_Sets/", filename), overwrite = TRUE)
+}
+
+# Jaccard Similarity Function
+jaccard_index <- function(set1, set2) {
+  length(intersect(set1, set2)) / length(union(set1, set2))
+}
+
+
+
+
+
+################ Gene Annotations from KEGG, GO, Reactome ###################
+# Enrichment Function
+run_enrichment <- function(gene_symbols) {
+  entrez <- bitr(gene_symbols, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+  
+  kegg <- enrichKEGG(entrez$ENTREZID, organism = "hsa", pvalueCutoff = 1, qvalueCutoff = 1)
+  go <- enrichGO(entrez$ENTREZID, OrgDb = org.Hs.eg.db, ont = "ALL", pvalueCutoff = 1, qvalueCutoff = 1, keyType = "ENTREZID")
+  reactome <- enrichPathway(entrez$ENTREZID, organism = "human", pvalueCutoff = 1, qvalueCutoff = 1, readable = TRUE)
+  
+  list(kegg = as.data.frame(kegg), go = as.data.frame(go), reactome = as.data.frame(reactome), entrez = entrez)
+}
+
+map_genes_to_pathways <- function(results, entrez_df) {
+  kegg_map <- results$kegg %>%
+    dplyr::select(Description, geneID) %>%
+    separate_rows(geneID, sep = "/") %>%
+    left_join(entrez_df, by = c("geneID" = "ENTREZID")) %>%
+    dplyr::select(SYMBOL, KEGG = Description)
+  
+  go_map <- results$go %>%
+    dplyr::select(Description, geneID) %>%
+    separate_rows(geneID, sep = "/") %>%
+    left_join(entrez_df, by = c("geneID" = "ENTREZID")) %>%
+    dplyr::select(SYMBOL, GO = Description)
+  
+  reactome_map <- results$reactome %>%
+    dplyr::select(Description, geneID) %>%
+    separate_rows(geneID, sep = "/") %>%
+    left_join(entrez_df, by = c("geneID" = "ENTREZID")) %>%
+    dplyr::select(SYMBOL, Reactome = Description)
+  
+  merged_df <- Reduce(full_join, list(kegg_map, go_map, reactome_map))
+  
+  # Ensure columns exist before renaming them
+  if (nrow(merged_df) == 0) {
+    merged_df <- tibble(SYMBOL = character(), combined_KEGG = character(), combined_GO = character(), combined_Reactome = character())
+  } else {
+    merged_df <- merged_df %>%
+      group_by(SYMBOL) %>%
+      summarize(
+        combined_KEGG = paste(unique(na.omit(KEGG)), collapse = "; "),
+        combined_GO = paste(unique(na.omit(GO)), collapse = "; "),
+        combined_Reactome = paste(unique(na.omit(Reactome)), collapse = "; "),
+        .groups = "drop"
+      )
+  }
+  
+  merged_df %>%
+    mutate(across(everything(), ~replace_na(., "None")))
+}
+
+
+
+######################## Gene Set Construction and Merging #########################
+# Build Gene Sets from Pathway Terms
+build_gene_sets <- function(mapping_df) {
+  pivot_longer(mapping_df, cols = starts_with("combined_"), names_to = "Source", values_to = "Terms") %>%
+    filter(Terms != "None") %>%
+    separate_rows(Terms, sep = "; ") %>%
+    group_by(Terms) %>%
+    summarize(
+      Genes = paste(unique(SYMBOL), collapse = ", "),
+      Gene_Count = n_distinct(SYMBOL),
+      .groups = "drop"
+    ) %>%
+    filter(Gene_Count > 1)
+}
+
+merge_gene_sets <- function(gene_sets_df, gene_symbol_mapping = NULL) {
+  gene_sets_df <- gene_sets_df %>% 
+    mutate(Gene_List = strsplit(Genes, ", "))
+  
+  merged_sets <- list()
+  visited <- rep(FALSE, nrow(gene_sets_df))
+  
+  for (i in seq_len(nrow(gene_sets_df))) {
+    if (!visited[i]) {
+      current_set <- gene_sets_df$Gene_List[[i]]
+      indices_to_merge <- which(sapply(seq_len(nrow(gene_sets_df)), function(j) {
+        jaccard_index(current_set, gene_sets_df$Gene_List[[j]]) > 0.5
+      }))
+      
+      merged_genes <- unique(unlist(gene_sets_df$Gene_List[indices_to_merge]))
+      merged_terms <- paste(unique(gene_sets_df$Terms[indices_to_merge]), collapse = "; ")
+      
+      merged_sets <- append(merged_sets, list(list(
+        Genes = paste(merged_genes, collapse = ", "),
+        Gene_Count = length(merged_genes),
+        Terms = merged_terms
+      )))
+      
+      visited[indices_to_merge] <- TRUE
+    }
+  }
+  
+  as.data.frame(do.call(rbind, lapply(merged_sets, as.data.frame)))
+}
+
+
+
+
+############### Filtering Relevant Pathways ####################
+filter_relevant_gene_sets <- function(scored_df) {
+  pattern <- paste(c(
+    "growth", "differentiation", "division", "proliferation", "TGF-beta", "Transforming-Growth-Factor", 
+    "MAPK", "Cell Cycle", "PI3K-Akt", "ERK", "mTOR", "Ras", "Wnt", "nutrients", "metabolism", 
+    "energy", "survival", "apoptosis", "cycle", "EGF", "FGF", "VEGF", "IGF", "Hedgehog", "Notch", 
+    "JAK-STAT", "NF-κB", "Glycolysis", "Pentose Phosphate Pathway", "Oxidative Phosphorylation", 
+    "AMPK", "Lipid Metabolism", "p53", "DNA Damage Response", "CHK1", "CHK2", "Cyclins", "CDKs", 
+    "Embryonic Development", "Stem Cell Differentiation", "Tissue Regeneration", "Bcl-2", "TNF", 
+    "Fas", "Cytoskeletal Organization", "Chromatin Remodeling", "Transcriptional Regulation"
+  ), collapse = "|")
+  
+  scored_df %>%
+    filter(str_detect(Terms, regex(pattern, ignore_case = TRUE)))
+}
+
+
+################## Complete Workflow Execution ##################
+filtered_final_pos_hits_symbols <- filtered_final_pos_hits$Preferred_name_v2
+
+# Step 1: Enrichment
+enrich_results <- run_enrichment(filtered_final_pos_hits_symbols)
+
+# Step 2: Map Genes to Pathways
+gene_pathway_mapping <- map_genes_to_pathways(enrich_results, enrich_results$entrez)
+write_to_excel(gene_pathway_mapping, "./Gene_Pathway_Mapping.xlsx")
+
+# Step 3: Build and Merge Gene Sets
+raw_gene_sets <- build_gene_sets(gene_pathway_mapping)
+merged_gene_sets <- merge_gene_sets(raw_gene_sets)  # No traceback needed
+write_to_excel(merged_gene_sets, "./Merged_Gene_Sets.xlsx")
+
+# Step 4: Filter Relevant Sets for Final Report
+final_relevant_sets <- filter_relevant_gene_sets(merged_gene_sets)
+write_to_excel(final_relevant_sets, "./Refined_Relevant_Gene_Sets_Final.xlsx")
+
+
+
+
+
+
+
+############################ Assigning Functional Groups to all Gene Sets ####################
+define_term_groups_refined <- function(terms) {
+  term_groups <- list(
+    # Existing groups with refined terms
+    "TGF-beta signaling" = c("SMAD", "TGF-beta", "Transforming Growth Factor beta", "TGF-beta response", "Transforming growth factor beta"),
+    
+    # Merged Groups
+    "Immune Cell Regulation and Differentiation" = c(
+      "T cell differentiation", "alpha-beta T cell differentiation", "lymphocyte differentiation", 
+      "leukocyte differentiation", "CD4-positive, alpha-beta T cell differentiation", 
+      "positive regulation of T cell proliferation", "regulation of T cell differentiation",
+      "negative regulation of alpha-beta T cell differentiation", "activated T cell proliferation",
+      "T cell", "lymphocyte", "immune response", "CD4-positive", "regulation of T cell", 
+      "Interleukin", "dendritic", "cytokine signaling", "macrophage activation", "leukocyte activity"
+    ),
+    
+    "Cellular Growth and Morphogenesis" = c(
+      "growth", "proliferation", "differentiation", "cell growth", 
+      "positive regulation of cell growth", "regulation of developmental growth", 
+      "multicellular organism growth", "developmental cell growth", 
+      "endothelial cell proliferation", "epithelial cell proliferation", 
+      "positive regulation of endothelial cell proliferation", "regulation of epithelial cell differentiation", 
+      "positive regulation of epithelial cell proliferation"
+    ),
+    
+    "Cell Migration and Chemotaxis" = c(
+      "chemotaxis", "leukocyte chemotaxis", "regulation of chemotaxis",
+      "positive regulation of chemotaxis", "regulation of leukocyte migration",
+      "regulation of leukocyte chemotaxis", "positive regulation of leukocyte chemotaxis",
+      "regulation of positive chemotaxis", "positive chemotaxis", "chemoattractant activity",
+      "cell migration", "endothelial migration", "epithelium migration", "tissue migration"
+    ),
+    
+    "Developmental and Tissue-Specific Processes" = c(
+      "development", "morphogenesis", "stem cell", "angiogenesis", "myelination", 
+      "axon ensheathment", "embryonic development", "organ growth", 
+      "tissue differentiation", "blood vessel remodeling", "regulation of axonogenesis", 
+      "single fertilization", "hair cycle", "hair cycle process", "molting cycle", "molting cycle process", 
+      "osteoblast differentiation", "regulation of osteoblast differentiation", "ossification", "bone development"
+    ),
+    
+    "Viral and Inflammatory Signaling" = c(
+      "viral", "infection", "host interaction", "virus life cycle", "virus", 
+      "immune evasion", "biological process involved in interaction with host", "symbiont entry into host",
+      "tumor necrosis factor", "TNF signaling", "TNF cascade", 
+      "cytokine production", "pro-inflammatory cytokine", "inflammatory response"
+    ),
+    
+    "Neural and Glial Differentiation" = c(
+      "glial cell differentiation", "neuroblast proliferation", "regulation of neuroblast proliferation", 
+      "neural precursor cell proliferation", "regulation of neural precursor cell proliferation",
+      "gliogenesis", "astrocyte differentiation", "ensheathment of neurons"
+    ),
+    
+    # Remaining groups
+    "Cell cycle regulation" = c(
+      "cell cycle", "regulation of cell cycle", "division", "checkpoint", 
+      "phase transition", "Cyclins", "CDKs", "chromosome organization", "mitotic"
+    ),
+    
+    "MAPK signaling" = c(
+      "MAPK", "ERK", "PI3K-Akt", "mTOR", "canonical MAPK cascade", 
+      "stress-activated MAPK cascade", "MAP kinase", "p38", "JNK cascade", "Ras signaling"
+    ),
+    
+    "Energy and metabolism" = c(
+      "metabolism", "oxidative phosphorylation", "glycolysis", "lipid metabolism", 
+      "retinol metabolic process", "alcohol metabolic process", "AMPK", 
+      "glycosylation", "protein glycosylation", "hexosyltransferase activity", 
+      "biosynthetic process", "retinoid metabolic process", "glycoprotein metabolic", 
+      "ATP synthesis", "oxidative stress", "lipid and atherosclerosis", "energy homeostasis"
+    ),
+    
+    "Stress response" = c(
+      "p53", "DNA damage response", "CHK1", "CHK2", "stress-activated", 
+      "response to UV", "senescence", "heat shock", "DNA repair", "ROS response"
+    ),
+    
+    "Wnt signaling pathway" = c(
+      "wnt signaling", "canonical Wnt signaling pathway", "Wnt cascade", "cell-cell signaling by Wnt"
+    ),
+    
+    "Apoptosis and survival" = c(
+      "apoptosis", "apoptotic", "cell death", "Bcl-2", "Fas", "programmed cell death", "caspases"
+    ),
+    
+    "Signaling pathways" = c(
+      "signal transduction", "JAK-STAT", "Notch", "Hedgehog", 
+      "signal release", "neurotransmitter", "NF-κB", "transferase activity", 
+      "AGE-RAGE", "Relaxin", "Rap1", "calcium-mediated signaling"
+    ),
+    
+    "Protein modification" = c(
+      "serine/threonine kinase", "ubiquitin", "protein ligase", 
+      "post-translational modification", "protein targeting", 
+      "endopeptidase", "methyltransferase activity", 
+      "protein serine/threonine kinase activity", "protein kinase", 
+      "transferase complex", "peptidyl-threonine", "peptidase", "kinase activity"
+    ),
+    
+    "Transport processes" = c(
+      "transport", "vesicle", "protein localization", "nuclear transport", 
+      "regulated exocytosis", "cytoplasmic vesicle lumen", "synaptic vesicle", 
+      "import into nucleus", "membrane trafficking", "endocytosis", 
+      "clathrin binding", "secretory granule lumen", "platelet alpha granule", "platelet alpha granule lumen", "exocytosis"
+    ),
+    
+    "Structural regulation" = c(
+      "cytoskeleton", "chromatin remodeling", "axon extension", 
+      "transcriptional regulation", "nuclear receptor binding", 
+      "cell junction assembly", "tubulin", "microtubule", "organelle", 
+      "focal adhesion", "cell adhesion", "extracellular matrix", "integrin binding", 
+      "cell-cell adhesion", "caveola", "plasma membrane raft", "neuron projection extension", "neuron projection arborization", 
+      "negative regulation of cell", "regulation of cell size"
+    ),
+    
+    "Transcription" = c(
+      "RNA polymerase", "DNA binding", "DNA-binding", "transcription factor", 
+      "protein-DNA complex", "transcription preinitiation", "transcription initiation"
+    ),
+    
+    "Epigenetic regulation" = c(
+      "epigenetic", "histone modification", "chromatin structure"
+    ),
+    
+    "Hemopoiesis" = c("hemopoiesis", "blood cell formation")
+  )
+
+  # Matching terms to groups
+  grouped_terms <- data.frame(Original_Term = terms, Group = "Other", stringsAsFactors = FALSE)
+  
+  for (term in terms) {
+    for (group_name in names(term_groups)) {
+      group_terms <- term_groups[[group_name]]
+      if (any(grepl(paste(group_terms, collapse = "|"), term, ignore.case = TRUE))) {
+        grouped_terms$Group[grouped_terms$Original_Term == term] <- group_name
+        break
+      }
+    }
+  }
+  
+  return(grouped_terms)
+}
+
+
+
+# Parse terms
+terms_list <- unlist(strsplit(final_relevant_sets$Terms, "; "))
+
+# Assign Groups
+grouped_terms <- define_term_groups_refined(terms_list)
+term_to_group <- setNames(grouped_terms$Group, grouped_terms$Original_Term)
+
+# Assign Group for Each Gene Set Based on Dominant Group in Terms
+final_relevant_sets$Assigned_Group <- sapply(strsplit(final_relevant_sets$Terms, "; "), function(terms) {
+  matched_groups <- na.omit(term_to_group[terms])
+  if (length(matched_groups) == 0) return("Other")
+  most_frequent <- names(which.max(table(matched_groups)))
+  paste(most_frequent, collapse = "; ")
+})
+
+# Final Output
+write_to_excel(final_relevant_sets, "Final_Gene_Sets_with_Groups.xlsx")
+
+
+
+grouped_term_frequencies <- grouped_terms %>%
+  group_by(Group) %>%
+  summarise(Frequency = n()) %>%
+  arrange(desc(Frequency))
+
+ggplot(grouped_term_frequencies, aes(x = reorder(Group, Frequency), y = Frequency)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "Grouped Term Frequencies",
+    x = "Grouped Terms",
+    y = "Frequency"
+  )
+
+ggsave("./output_data/Gene_Sets/Grouped_Term_Frequencies.png", width = 8, height = 6)
+
+
+```
+
+
+\
+
+
+## 4.3 Benchmarking against existing CRISPR Screens and Essential Gene Sets
+
+\
+
+
+This section demonstrates how essential gene sets from the literature and a virus-free CRISPR screen are compared to the gene hits identified in this study. **Note that these comparisons are illustrative, and final conclusions were based on extended analyses not fully captured in this example code.**
+
+---
+
+**Data Sources**  
+- **DEG15 Database**: Literature-derived essential gene sets.  
+- **Virus-Free CRISPR Screen**: Essential gene hits identified in a virus-free CHO-S CRISPR screen (Xiong et.  
+- **This Study**: Negative hits from the current analysis (strict filtering applied).
+
+---
+
+**Analysis Steps**  
+
+1. **Data Loading and Preprocessing**  
+   - Essential gene sets were imported and filtered for relevant species (**Homo sapiens** and **Mus musculus**).
+   - Gene names were standardized by removing suffixes, converting to lowercase, and harmonizing naming conventions.
+
+2. **Overlap Calculation**  
+   - Pairwise overlaps between gene sets were calculated using the fractional overlap coefficient:  
+   \[
+   \text{Fractional Overlap} = \frac{|\text{Intersection}|}{\min(|\text{Set}_1|, |\text{Set}_2|)}
+   \]
+   - Results were compiled into a summary table and exported.
+
+3. **Visualization**  
+   - A clustered heatmap visualized the overlap matrix, showing similarities between datasets.  
+   - Annotations highlighted organism origin and method type for each dataset.
+
+4. **Mean Overlap Calculation**  
+   - The average overlap for each gene set across all comparisons was calculated and exported for ranking.
+
+---
+
+**Outputs**  
+- Overlap Summary Table (`final_comparison_table_lenient.xlsx`)  
+- Overlap Heatmap (`essential_genes_heatmap_lenient.png`)  
+- Mean Overlap Rankings (`mean_overlap_table_lenient.xlsx`)  
+
+> **Note:** The analyses shown here are for demonstration purposes. Final evaluations incorporated additional validation and biological review.
+
+
+
+\
+
+```{r}
+############# Re-Factored Code #################
+
+
+
+# ---- 1. Load Data ----
+essentiality_data <- read_delim("./input_data/Essentiality_Virus_Free_CRISPR.csv", delim = "\t")
+deg_data <- read_excel("./input_data/deg_annotation_e.xlsx")
+deg_metadata <- read_excel("./input_data/DEG_Sets_Metadata_v2.xlsx")
+
+# Filter for Homo sapiens and Mus musculus entries
+filtered_deg_data <- deg_data %>%
+  filter(grepl("Homo sapiens|Mus musculus", Organism))
+
+# Prepare DEG Sets List
+deg_data_list <- split(filtered_deg_data, filtered_deg_data$Set)
+essentiality_set <- essentiality_data %>%
+  mutate(Gene_Name = tolower(gsub("__\\d+$", "", gene)))
+deg_data_list[["Xiong et al."]] <- essentiality_set
+
+# Preprocess Lenient Hits
+all_unique_neg_hits_df_lenient <- all_unique_neg_hits_df_lenient %>%
+  filter(!is.na(Preferred_name_v2)) %>%
+  mutate(Preferred_name_v2_lower = tolower(Preferred_name_v2))
+
+# ---- 2. Calculate Overlap ----
+comparison_results <- lapply(names(deg_data_list), function(deg_name) {
+  deg_df <- deg_data_list[[deg_name]] %>%
+    filter(!is.na(Gene_Name)) %>%
+    mutate(Gene_Name_lower = tolower(Gene_Name))
+  
+  overlap <- intersect(all_unique_neg_hits_df_lenient$Preferred_name_v2_lower, deg_df$Gene_Name_lower)
+  
+  data.frame(
+    DEG_Set = deg_name,
+    Total_Essentiality_Genes = nrow(deg_df),
+    Overlapping_Genes = length(overlap),
+    Fractional_Overlap_Essentiality = length(overlap) / nrow(deg_df)
+  )
+})
+
+final_comparison_table <- bind_rows(comparison_results) %>%
+  left_join(deg_metadata, by = c("DEG_Set" = "DEG_Set"))
+
+# Export Comparison Table
+write.xlsx(final_comparison_table, "./output_data/DEG_comparison/final_comparison_table_lenient.xlsx", overwrite = TRUE)
+
+# ---- 3. Calculate Overlap Matrix for Heatmap ----
+deg_data_list[["This Study"]] <- all_unique_neg_hits_df_lenient %>%
+  mutate(Gene_Name = tolower(Preferred_name_v2))  # Directly create 'Gene_Name'
+
+
+set_names <- names(deg_data_list)
+overlap_matrix <- matrix(0, nrow = length(set_names), ncol = length(set_names),
+                         dimnames = list(set_names, set_names))
+
+calculate_overlap <- function(set1, set2) {
+  overlap_size <- length(intersect(set1, set2))
+  min_size <- min(length(set1), length(set2))
+  if (min_size == 0) return(0)
+  return(overlap_size / min_size)
+}
+
+for (i in seq_along(set_names)) {
+  for (j in seq_along(set_names)) {
+    genes1 <- tolower(deg_data_list[[set_names[i]]]$Gene_Name)
+    genes2 <- tolower(deg_data_list[[set_names[j]]]$Gene_Name)
+    overlap_matrix[i, j] <- calculate_overlap(genes1, genes2)
+  }
+}
+
+# Rename for Heatmap Consistency
+rownames(overlap_matrix) <- colnames(overlap_matrix) <- gsub("Essentiality_CRISPR", "Xiong et al.", rownames(overlap_matrix))
+
+# ---- Heatmap Annotations ----
+annotation_df <- data.frame(
+  Organism = ifelse(grepl("Xiong|This Study", rownames(overlap_matrix)), "CHO", "Human/Mouse"),
+  Method = ifelse(rownames(overlap_matrix) == "This Study", "CRISPR (This Study)", "Other")
+)
+rownames(annotation_df) <- rownames(overlap_matrix)
+
+annotation_colors <- list(
+  Organism = c("CHO" = "#ff7f0e", "Human/Mouse" = "#1f77b4"),
+  Method = c("CRISPR (This Study)" = "#17becf", "Other" = "#7f7f7f")
+)
+
+# ---- 4. Generate Final Heatmap ----
+pheatmap(overlap_matrix,
+         display_numbers = TRUE,
+         number_format = "%.1f",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         fontsize = 12,
+         cellheight = 20,
+         cellwidth = 20,
+         annotation_col = annotation_df,
+         annotation_colors = annotation_colors,
+         color = colorRampPalette(c("white", "#17becf"))(100),
+         filename = "./output_data/DEG_comparison/essential_genes_heatmap_lenient.png",
+         width = 10,
+         height = 8)
+
+# ---- 5. Calculate Mean Overlap and Export ----
+mean_overlap_df <- data.frame(
+  Gene_Set = rownames(overlap_matrix),
+  Mean_Overlap = rowMeans(overlap_matrix, na.rm = TRUE)
+) %>%
+  arrange(desc(Mean_Overlap))
+
+write.xlsx(mean_overlap_df, "./output_data/DEG_comparison/mean_overlap_table_lenient.xlsx", overwrite = TRUE)
+
+# Final Confirmation Output
+print(mean_overlap_df)
+
+
+```
+
+
