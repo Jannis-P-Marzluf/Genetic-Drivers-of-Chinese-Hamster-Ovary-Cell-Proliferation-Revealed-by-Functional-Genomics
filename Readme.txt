@@ -12,7 +12,7 @@ Both R and Python environments are supported and fully documented.
 │   ├── .venv/                     # Python virtual environment (optional)  
 │   ├── Heatmap_of_top_genes.ipynb # Jupyter Notebook for visualization  
 │   ├── README.md                  # Python-specific instructions   
-│   ├── README.md                  # Python-specific instructions  
+│   ├── MAGeck-Code.ipynb          # MAGeCK-specific instructions parameters used for read count normalization, gene ranking, and statistical testing  
 │   └── requirements.txt           # Python dependencies  
 │  
 ├── R/  
