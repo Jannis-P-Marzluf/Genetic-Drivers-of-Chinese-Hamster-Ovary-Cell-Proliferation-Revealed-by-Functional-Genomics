@@ -280,7 +280,7 @@ normalized_data <- merged_data %>%
 weights <- c(
   purity = 0.05,
   median = 0.15,
-  sd = 0.45,
+  sd = 0.35,
   skewness = 0.15,
   low_count_pct = 0.3
 )

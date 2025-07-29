@@ -1768,10 +1768,8 @@ library(e1071)</code></pre>
 ## 
 ## Please cite:
 ## 
-## Guangchuang Yu, Li-Gen Wang, Yanyan Han and Qing-Yu He.
-## clusterProfiler: an R package for comparing biological themes among
-## gene clusters. OMICS: A Journal of Integrative Biology. 2012,
-## 16(5):284-287</code></pre>
+## G Yu. Thirteen years of clusterProfiler. The Innovation. 2024,
+## 5(6):100722</code></pre>
 <pre><code>## 
 ## Attache Paket: &#39;clusterProfiler&#39;</code></pre>
 <pre><code>## Das folgende Objekt ist maskiert &#39;package:purrr&#39;:
@@ -2151,7 +2149,7 @@ normalized_data &lt;- merged_data %&gt;%
 weights &lt;- c(
   purity = 0.05,
   median = 0.15,
-  sd = 0.45,
+  sd = 0.35,
   skewness = 0.15,
   low_count_pct = 0.3
 )
@@ -2205,9 +2203,9 @@ comparison_scores_df &lt;- bind_rows(comparison_scores) %&gt;%
 
 print(comparison_scores_df)</code></pre>
 <pre><code>                 Comparison Relative_Score</code></pre>
-<p>time replicates time replicates 1.0291342 Shake-Flask Shake-Flask
-0.8430237 4 Week 4 Week 0.3883714 6 Week 6 Week 0.3840557 2 Week 2 Week
-0.2567071 Perfusion Perfusion 0.1861106</p>
+<p>time replicates time replicates 1.0180414 Shake-Flask Shake-Flask
+0.8343946 4 Week 4 Week 0.3851583 6 Week 6 Week 0.3810278 2 Week 2 Week
+0.2518553 Perfusion Perfusion 0.1836467</p>
 <pre class="r"><code># ---- 5. Export Final Data ----
 write.xlsx(normalized_data, &quot;./output_data/Comparison_Weights_Scores/QC_Normalized_Scores.xlsx&quot;, overwrite = TRUE)
 write.xlsx(comparison_scores_df, &quot;./output_data/Comparison_Weights_Scores/QC_Comparison_Scores_equal_to_comp_weights.xlsx&quot;, overwrite = TRUE)</code></pre>
