@@ -11,6 +11,7 @@ Both R and Python environments are supported and fully documented.
 │   ├── output_data/               # All generated plots and analysis results  
 │   ├── .venv/                     # Python virtual environment (optional)  
 │   ├── Heatmap_of_top_genes.ipynb # Jupyter Notebook for visualization  
+│   ├── README.md                  # Python-specific instructions   
 │   ├── README.md                  # Python-specific instructions  
 │   └── requirements.txt           # Python dependencies  
 │  
