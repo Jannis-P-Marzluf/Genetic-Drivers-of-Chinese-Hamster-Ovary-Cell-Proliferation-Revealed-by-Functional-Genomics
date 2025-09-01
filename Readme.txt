@@ -4,6 +4,18 @@ This repository contains all scripts and data necessary for the analysis and vis
 Both R and Python environments are supported and fully documented.
 
 --------------------------------------------------------------------------------
+## Additional Curated Tables (added post-publication)
+
+As supplementary resources, several curated tables were added **after acceptance of the publication** to provide expanded reference datasets:
+
+- **Table S6** – All final ranked positive hits (`Table S6 All final ranked positive hits.xlsx`).  
+- **Table S7** – CHO Essential genes (CHO_EG2025) (`Table S7 CHO Essential genes (CHO_EG2025).xlsx`).  
+- **Table S8** – All positive hits across all comparisons (`Table S8 All positive hits across all comparisons.xlsx`).  
+- **Table S9** – Growth enhancing functional gene sets (`Table S9 Growth enhancing functional gene sets.xlsx`).  
+
+These are located in the `output_data/` directory and serve as supplementary curated datasets beyond the originally published analysis.
+
+--------------------------------------------------------------------------------
 ## Repository Structure
 
 ├── Python/  
@@ -36,17 +48,23 @@ Both R and Python environments are supported and fully documented.
 
 1. Create and activate virtual environment:
 
+    ```bash
     python -m venv .venv  
-    .venv\Scripts\activate      (on Windows)  
-    source .venv/bin/activate   (on Unix)  
+    .venv\Scripts\activate      # on Windows  
+    source .venv/bin/activate   # on Unix  
+    ```
 
 2. Install dependencies:
 
+    ```bash
     pip install -r requirements.txt  
+    ```
 
 3. Run Jupyter Notebook:
 
+    ```bash
     jupyter notebook Heatmap_of_top_genes.ipynb  
+    ```
 
 --------------------------------------------------------------------------------
 ### R  
@@ -86,5 +104,6 @@ Both R and Python environments are supported and fully documented.
 - All scripts are fully annotated for ease of understanding.  
 - Modify the abbreviations dictionary in Python scripts to change functional group names.  
 - For R, adjust filtering thresholds directly in the R Markdown file.  
+- The curated Tables **S6–S9** were added after acceptance of the publication as additional supplementary resources.  
 
 --------------------------------------------------------------------------------
